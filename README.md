@@ -231,19 +231,6 @@ Copy a single file to the target. Run. Done.
 
 ---
 
-## Push to GitHub
-
-```bash
-cd ZScan
-git init && git add .
-git commit -m "feat: ZScan v1.0.0 — 86-script air-gap network scanner"
-git branch -M main
-git remote add origin https://github.com/YOUR_USER/ZScan.git
-git push -u origin main
-```
-
----
-
 **For authorised security testing only. Only scan systems you own or have explicit written permission to test.**
 
 MIT License
