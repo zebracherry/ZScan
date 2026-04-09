@@ -1,30 +1,25 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    ZScan v2.0.0 — Air-gap Safe Network Scanner (PowerShell Edition)
+    ZScan v2.1.0 — Air-gap Safe Network Scanner (PowerShell Edition)
 
 .DESCRIPTION
     ZScan.ps1 — Windows network scanner with embedded NSE-equivalent scripts.
     No dependencies. No internet. No installs. Runs on any Windows 10/11/Server
     with PowerShell 5.1+ — which is every modern Windows system.
 
-    WHAT'S NEW IN v2.0:
-      FTP: full anonymous login + PASV directory listing (mirrors nmap ftp-anon)
-      FTP: SYST command, bounce check, non-standard port detection
-      FTP: vsftpd 2.3.4 backdoor probe (CVE-2011-2523)
-      FTP: service detection via banner (works on port 30021 etc.)
-      SSH: hostkey + weak version detection
-      SMB: improved EternalBlue / DoublePulsar detection
-      DNS: recursion check + zone transfer probe
-      SNMP: community string brute (public/private/community)
-      NTP: info + monlist CVE-2013-5211
-      Modbus: ICS/SCADA exposure check
-      Rsync: unauthenticated module listing
-      Kubernetes: API + Kubelet exposure
-      Docker: unauthenticated API check
-      SSL: cert expiry check
-      All scripts now work on non-standard ports via banner detection
-      -p flag now accepts comma-lists and ranges together
+    WHAT'S NEW IN v2.1:
+      HTTP: OPTIONS-based method detection (PUT/DELETE/TRACE/WebDAV etc.)
+      HTTP: http-webdav-scan — detects PROPFIND/MKCOL/LOCK/UNLOCK exposure
+      HTTP: http-open-proxy — CONNECT method detection
+      HTTP: http-trace — TRACE XST vulnerability check
+      HTTP: non-standard ports now get full HTTP script suite (33033, 45332 etc.)
+      SSL:  cert check now uses raw SslStream — works on ANY port (44330 etc.)
+      SSL:  protocol version check (TLSv1/SSLv3 flagged as weak)
+      FTP:  directory listing now grouped into single result (cleaner output)
+      Service: banner-based name upgrade (unknown ports now show http/ftp/ssh etc.)
+      Banner: TLS fallback probe for non-standard SSL ports
+      Banner: HTTP probe sent on all non-raw-service ports
 
 .EXAMPLE
     .\zscan.ps1 -Target 192.168.1.0/24 -ScanType Ping
@@ -74,7 +69,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "SilentlyContinue"
 
-$VERSION = "2.0.0"
+$VERSION = "2.1.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COLOUR HELPERS
@@ -262,37 +257,22 @@ function Test-UDPPort([string]$IP, [int]$Port, [int]$TMs=2000) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BANNER GRABBING
+# BANNER GRABBING  (v2.1: HTTP probe on unknown ports + TLS fallback)
 # ─────────────────────────────────────────────────────────────────────────────
 function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
-    $HttpPorts = @(80,8080,8443,443,8888,9090,9200,5000,3000,7070,8000,2375,6443,10250)
-    $SslPorts  = @(443,8443,993,995,465,636)
-    try {
-        $tcp = [System.Net.Sockets.TcpClient]::new()
-        $ar  = $tcp.BeginConnect($IP, $Port, $null, $null)
-        $ok  = $ar.AsyncWaitHandle.WaitOne($TMs, $false)
-        if (-not ($ok -and $tcp.Connected)) { $tcp.Close(); return "" }
-        $stream = $tcp.GetStream()
-        $stream.ReadTimeout  = $TMs
-        $stream.WriteTimeout = $TMs
-        if ($Port -in $SslPorts) {
-            try {
-                $sslStream = [System.Net.Security.SslStream]::new($stream,$false,{$true})
-                $sslStream.AuthenticateAsClient($IP)
-                $stream = $sslStream
-            } catch {}
-        }
-        if ($Port -in $HttpPorts) {
-            $req   = "GET / HTTP/1.0`r`nHost: $IP`r`nUser-Agent: Mozilla/5.0`r`nConnection: close`r`n`r`n"
-            $bytes = [System.Text.Encoding]::ASCII.GetBytes($req)
-            $stream.Write($bytes, 0, $bytes.Length)
-        }
-        $buf   = [byte[]]::new(8192)
-        $sb    = [System.Text.StringBuilder]::new()
-        $sw    = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($sw.ElapsedMilliseconds -lt $TMs -and $sb.Length -lt 4096) {
+    $SslPorts  = @(443,8443,993,995,465,636,44330)
+    $HttpPorts = @(80,8080,8443,443,8888,9090,9200,5000,3000,7070,8000,
+                   2375,6443,10250,33033,45332,45443)
+    # Non-HTTP raw-read ports — don't send HTTP probe to these
+    $RawPorts  = @(22,21,25,110,143,3306,5432,6379,27017,3389,5900)
+
+    function Read-Stream($stream, $TMs2) {
+        $buf = [byte[]]::new(8192)
+        $sb  = [System.Text.StringBuilder]::new()
+        $sw  = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt $TMs2 -and $sb.Length -lt 4096) {
             if ($stream.DataAvailable) {
-                $n = $stream.Read($buf, 0, $buf.Length)
+                $n = $stream.Read($buf,0,$buf.Length)
                 if ($n -eq 0) { break }
                 $sb.Append([System.Text.Encoding]::UTF8.GetString($buf,0,$n)) | Out-Null
             } else {
@@ -300,9 +280,63 @@ function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
                 if ($sw.ElapsedMilliseconds -gt 1000 -and $sb.Length -gt 0) { break }
             }
         }
-        $tcp.Close()
         return $sb.ToString()
-    } catch { return "" }
+    }
+
+    # ── Plain TCP attempt ─────────────────────────────────────────────────────
+    try {
+        $tcp = [System.Net.Sockets.TcpClient]::new()
+        $ar  = $tcp.BeginConnect($IP,$Port,$null,$null)
+        if (-not $ar.AsyncWaitHandle.WaitOne($TMs,$false)) { $tcp.Close(); return "" }
+        $stream = $tcp.GetStream()
+        $stream.ReadTimeout  = $TMs
+        $stream.WriteTimeout = $TMs
+
+        # Wrap SSL for known TLS ports
+        if ($Port -in $SslPorts) {
+            try {
+                $sslStream = [System.Net.Security.SslStream]::new($stream,$false,{$true})
+                $sslStream.AuthenticateAsClient($IP)
+                $stream = $sslStream
+            } catch {}
+        }
+
+        # Send HTTP GET for HTTP ports or any port not in RawPorts
+        if ($Port -in $HttpPorts -or $Port -notin $RawPorts) {
+            $req   = "GET / HTTP/1.0`r`nHost: $IP`r`nUser-Agent: Mozilla/5.0`r`nConnection: close`r`n`r`n"
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes($req)
+            try { $stream.Write($bytes,0,$bytes.Length) } catch {}
+        }
+
+        $result = Read-Stream $stream $TMs
+        $tcp.Close()
+        if ($result) { return $result }
+    } catch {}
+
+    # ── TLS fallback for non-standard ports ───────────────────────────────────
+    if ($Port -notin $SslPorts) {
+        try {
+            $tcp2 = [System.Net.Sockets.TcpClient]::new()
+            $ar2  = $tcp2.BeginConnect($IP,$Port,$null,$null)
+            if ($ar2.AsyncWaitHandle.WaitOne($TMs,$false) -and $tcp2.Connected) {
+                $stream2 = $tcp2.GetStream()
+                $stream2.ReadTimeout = $TMs
+                try {
+                    $sslStream2 = [System.Net.Security.SslStream]::new($stream2,$false,{$true})
+                    $sslStream2.AuthenticateAsClient($IP)
+                    $req2   = "GET / HTTP/1.0`r`nHost: $IP`r`nConnection: close`r`n`r`n"
+                    $bytes2 = [System.Text.Encoding]::ASCII.GetBytes($req2)
+                    $sslStream2.Write($bytes2,0,$bytes2.Length)
+                    $result2 = Read-Stream $sslStream2 $TMs
+                    $tcp2.Close()
+                    if ($result2) { return $result2 }
+                } catch {}
+            }
+            $tcp2.Close()
+        } catch {}
+    }
+
+    return ""
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +371,8 @@ function Get-Version([string]$Banner, [int]$Port) {
         }
     }
     $svc  = if ($ServiceDB.ContainsKey($Port)) { $ServiceDB[$Port] } else { "unknown" }
+    # For any HTTP response without a matched Server: pattern, return status
+    if ($Banner -match "^HTTP/[\d\.]+ (\d+)") { return "HTTP $($Matches[1])" }
     $line = ($Banner -split "`n")[0].Trim()
     if ($line.Length -gt 3) { return "$svc`: $($line.Substring(0,[Math]::Min(60,$line.Length)))" }
     return $svc
@@ -496,18 +532,26 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         $results.Add([PSCustomObject]@{Name=$Name;Output=$Out;Vuln=$Vuln;CVE=$CVE})
     }
 
-    # Service detection — banner-based for non-standard ports
+    # Service detection — banner-based so non-standard ports are identified correctly
+    $bannerIsHTTP  = $Banner -match "^HTTP/|Server:\s*\S|<html" 
+    $bannerIsFTP   = ($Banner -match "^220[\s\-]") -and ($Banner -notmatch "SMTP|ESMTP")
+    $bannerIsSSH   = $Banner -match "^SSH-"
+    $bannerIsSMTP  = $Banner -match "^220[\s\-].*(SMTP|ESMTP|mail)"
+
     $isFTP     = $Service -in @("ftp","ftp-proxy","ftps","ftp-data") -or
-                 $Port -in @(20,21,990,2121) -or $Banner -match "^220[\s\-]"
+                 $Port -in @(20,21,990,2121) -or $bannerIsFTP
     $isHTTP    = $Service -in @("http","https","http-proxy","https-alt") -or
-                 $Port -in @(80,8080,8443,443,8888,8000,9090,9200,5000,3000,7070)
-    $isSSH     = $Service -eq "ssh" -or $Port -eq 22 -or $Banner -match "^SSH-"
+                 $Port -in @(80,8080,8443,443,8888,8000,9090,9200,5000,3000,7070,33033,45332,45443) -or
+                 $bannerIsHTTP
+    $isSSH     = $Service -eq "ssh" -or $Port -eq 22 -or $bannerIsSSH
     $isSMB     = $Service -in @("smb","netbios-ssn") -or $Port -in @(139,445)
-    $isSMTP    = $Service -in @("smtp","submission","smtps") -or $Port -in @(25,465,587)
+    $isSMTP    = $Service -in @("smtp","submission","smtps") -or $Port -in @(25,465,587) -or $bannerIsSMTP
     $isDNS     = $Service -eq "dns" -or $Port -eq 53
     $isSNMP    = $Service -eq "snmp" -or $Port -eq 161
     $isRDP     = $Service -eq "ms-wbt-server" -or $Port -eq 3389
-    $isSSL     = $Service -in @("https","imaps","pop3s","smtps") -or $Port -in @(443,8443,993,995,465)
+    $isSSL     = $Service -in @("https","imaps","pop3s","smtps","ssl") -or
+                 $Port -in @(443,8443,993,995,465,44330) -or
+                 "ssl" -in $Service.ToLower()
     $isRedis   = $Service -eq "redis" -or $Port -eq 6379
     $isMySQL   = $Service -eq "mysql" -or $Port -eq 3306
     $isElastic = $Port -eq 9200 -or $Service -eq "elasticsearch"
@@ -530,25 +574,24 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         }
     }
 
-    # ── FTP Scripts (v2) ──────────────────────────────────────────────────────
+    # ── FTP Scripts (v2.1) ────────────────────────────────────────────────────
     if ($isFTP -and (Wants "default")) {
-        # ftp-anon + directory listing
         $ftpTcp, $ftpBanner = Connect-FTP $IP $Port 5000
         if ($ftpTcp) {
-            $r1  = Send-FTPCmd $ftpTcp "USER anonymous" 5000
+            $r1 = Send-FTPCmd $ftpTcp "USER anonymous" 5000
             if ($r1 -match "^331") { $r2 = Send-FTPCmd $ftpTcp "PASS anonymous@example.com" 5000 }
             else                   { $r2 = $r1 }
 
             if ($r2 -match "^230") {
-                Add-R "ftp-anon" "Anonymous FTP login allowed (FTP code 230)" $true
-                # PASV directory listing
+                # Collect directory listing first
                 $pasvResp = Send-FTPCmd $ftpTcp "PASV" 5000
                 $dataTcp  = Get-PASVSocket $IP $pasvResp 5000
+                $listLines = @()
                 if ($dataTcp) {
                     Send-FTPCmd $ftpTcp "LIST" 5000 | Out-Null
-                    $ds   = $dataTcp.GetStream(); $ds.ReadTimeout = 5000
-                    $buf  = [byte[]]::new(65536); $sb2 = [System.Text.StringBuilder]::new()
-                    $sw2  = [System.Diagnostics.Stopwatch]::StartNew()
+                    $ds  = $dataTcp.GetStream(); $ds.ReadTimeout = 5000
+                    $buf = [byte[]]::new(65536); $sb2 = [System.Text.StringBuilder]::new()
+                    $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
                     while ($sw2.ElapsedMilliseconds -lt 5000) {
                         if ($ds.DataAvailable) {
                             $n = $ds.Read($buf,0,$buf.Length)
@@ -557,12 +600,17 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                         } else { Start-Sleep -Ms 50; if ($sw2.ElapsedMilliseconds -gt 2000 -and $sb2.Length -gt 0) { break } }
                     }
                     $dataTcp.Close()
-                    foreach ($line in ($sb2.ToString() -split "`n" | Where-Object {$_.Trim()})) {
-                        Add-R "ftp-anon" "| $($line.TrimEnd())"
-                    }
-                } else {
-                    Add-R "ftp-anon" "| (PASV failed — could not open data channel)"
+                    $listLines = $sb2.ToString() -split "`n" | Where-Object {$_.Trim()}
                 }
+                # Single result with full listing embedded
+                $listStr = "Anonymous FTP login allowed (FTP code 230)"
+                if ($listLines) {
+                    $listStr += "`n" + ($listLines | ForEach-Object { "    | $($_.TrimEnd())" }) -join "`n"
+                } else {
+                    $listStr += "`n    | (PASV failed — could not open data channel)"
+                }
+                Add-R "ftp-anon" $listStr $true
+
                 # ftp-syst
                 $systResp = Send-FTPCmd $ftpTcp "SYST" 5000
                 if ($systResp -match "^215") {
@@ -582,7 +630,6 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
             }
             try { $ftpTcp.Close() } catch {}
         }
-
         # ftp-vsftpd-backdoor (CVE-2011-2523)
         if ((Wants "vuln") -and $Banner -match "vsftpd 2\.3\.4") {
             Add-R "ftp-vsftpd-backdoor" "vsftpd 2.3.4 — check for backdoor on port 6200" $true "CVE-2011-2523"
@@ -596,10 +643,67 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
             Add-R "http-title" $Matches[1].Trim().Substring(0,[Math]::Min(100,$Matches[1].Trim().Length))
         }
         if ($r.H.ContainsKey("server")) { Add-R "http-server-header" $r.H["server"] }
+
+        # http-methods + http-webdav-scan + http-open-proxy
+        try {
+            $optTcp = [System.Net.Sockets.TcpClient]::new()
+            $arOpt  = $optTcp.BeginConnect($IP,$Port,$null,$null)
+            if ($arOpt.AsyncWaitHandle.WaitOne(5000,$false) -and $optTcp.Connected) {
+                $optStream = $optTcp.GetStream(); $optStream.ReadTimeout = 5000
+                $optReq    = [System.Text.Encoding]::ASCII.GetBytes("OPTIONS / HTTP/1.0`r`nHost: $IP`r`n`r`n")
+                $optStream.Write($optReq,0,$optReq.Length)
+                $optBuf = [byte[]]::new(8192); $optSB = [System.Text.StringBuilder]::new()
+                $optSW  = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($optSW.ElapsedMilliseconds -lt 3000 -and $optSB.Length -lt 4096) {
+                    if ($optStream.DataAvailable) {
+                        $n = $optStream.Read($optBuf,0,$optBuf.Length)
+                        if ($n -eq 0) { break }
+                        $optSB.Append([System.Text.Encoding]::UTF8.GetString($optBuf,0,$n)) | Out-Null
+                    } else { Start-Sleep -Ms 50; if ($optSW.ElapsedMilliseconds -gt 1000 -and $optSB.Length -gt 0) { break } }
+                }
+                $optTcp.Close()
+                $optStr = $optSB.ToString()
+                if ($optStr -match "(?:Allow|Public):\s*([^\r\n]+)") {
+                    $methodsStr  = $Matches[1].Trim()
+                    $riskyList   = @("PUT","DELETE","CONNECT","TRACE","PATCH","PROPFIND","PROPPATCH","COPY","MOVE","MKCOL","LOCK","UNLOCK")
+                    $risky       = $methodsStr -split "," | ForEach-Object {$_.Trim()} | Where-Object {$_ -in $riskyList}
+                    $out         = "Supported Methods: $methodsStr"
+                    if ($risky) { $out += "`n      Potentially risky: $($risky -join ', ')" }
+                    Add-R "http-methods" $out ($risky.Count -gt 0)
+                    # WebDAV check
+                    $webdavMethods = @("PROPFIND","PROPPATCH","MKCOL","COPY","MOVE","LOCK","UNLOCK")
+                    $wdFound = $methodsStr -split "," | ForEach-Object {$_.Trim()} | Where-Object {$_ -in $webdavMethods}
+                    if ($wdFound) {
+                        $dateMatch = if ($optStr -match "Date:\s*([^\r\n]+)") { $Matches[1].Trim() } else { "unknown" }
+                        $svrHdr    = if ($r.H.ContainsKey("server")) { $r.H["server"] } else { "unknown" }
+                        Add-R "http-webdav-scan" "WebDAV enabled | Server: $svrHdr | Date: $dateMatch`n      Allowed: $methodsStr" $true
+                    }
+                    # Open proxy
+                    if ($methodsStr -match "CONNECT") {
+                        Add-R "http-open-proxy" "Potentially OPEN proxy — CONNECT method supported" $true
+                    }
+                }
+            }
+        } catch {}
+
+        # http-trace
+        try {
+            $trTcp = [System.Net.Sockets.TcpClient]::new()
+            $arTr  = $trTcp.BeginConnect($IP,$Port,$null,$null)
+            if ($arTr.AsyncWaitHandle.WaitOne(3000,$false) -and $trTcp.Connected) {
+                $trS  = $trTcp.GetStream(); $trS.ReadTimeout = 3000
+                $trReq = [System.Text.Encoding]::ASCII.GetBytes("TRACE / HTTP/1.0`r`nHost: $IP`r`n`r`n")
+                $trS.Write($trReq,0,$trReq.Length)
+                $trBuf = [byte[]]::new(1024); $n = $trS.Read($trBuf,0,$trBuf.Length); $trTcp.Close()
+                $trStr = [System.Text.Encoding]::ASCII.GetString($trBuf,0,$n)
+                if ($trStr -match "^HTTP/[\d\.]+ 200") { Add-R "http-trace" "HTTP TRACE method enabled — XST vulnerability" $true }
+            }
+        } catch {}
+
         if ((Wants "safe")) {
-            $secH   = @("x-frame-options","x-xss-protection","x-content-type-options",
-                        "strict-transport-security","content-security-policy","referrer-policy")
-            $miss   = $secH | Where-Object { -not $r.H.ContainsKey($_) }
+            $secH = @("x-frame-options","x-xss-protection","x-content-type-options",
+                      "strict-transport-security","content-security-policy","referrer-policy")
+            $miss = $secH | Where-Object { -not $r.H.ContainsKey($_) }
             if ($miss) { Add-R "http-security-headers" "Missing: $($miss -join ', ')" $true }
             else       { Add-R "http-security-headers" "All key security headers present" }
         }
@@ -640,7 +744,6 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $slugs = [regex]::Matches($rw.B,'"slug"\s*:\s*"([^"]+)"') | Select-Object -First 5 | ForEach-Object {$_.Groups[1].Value}
                 Add-R "http-wordpress-users" "WordPress users: $($slugs -join ', ')" $true
             }
-            # http-enum
             $enumPaths = @("/admin","/administrator","/manager","/login","/phpmyadmin",
                            "/phpinfo.php","/.env","/.htaccess","/backup","/config.php",
                            "/web.config","/server-status","/server-info")
@@ -650,7 +753,6 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
             }
             if ($found) { Add-R "http-enum" "Paths: $($found -join ', ')" }
         }
-        # WAF detect
         if ((Wants "safe")) {
             $allTxt = (($r.H.Values) -join " ").ToLower() + $r.B.Substring(0,[Math]::Min(500,$r.B.Length)).ToLower()
             $wafs   = @{"Cloudflare"=@("cf-ray","cloudflare");"AWS WAF"=@("x-amzn-requestid","awselb");
@@ -933,25 +1035,38 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── SSL Cert ──────────────────────────────────────────────────────────────
+    # ── SSL Cert (v2.1 — raw SslStream, works on any port including 44330) ────
     if ($isSSL -and (Wants "default")) {
         try {
-            $req = [System.Net.HttpWebRequest]::CreateHttp("https://${IP}:${Port}/")
-            $req.Timeout = 5000
-            $req.ServerCertificateValidationCallback = {$true}
-            try {
-                $resp = $req.GetResponse()
-                $cert = $req.ServicePoint.Certificate
+            $sslTcp = [System.Net.Sockets.TcpClient]::new()
+            $arSSL  = $sslTcp.BeginConnect($IP,$Port,$null,$null)
+            if ($arSSL.AsyncWaitHandle.WaitOne(5000,$false) -and $sslTcp.Connected) {
+                $sslStream = [System.Net.Security.SslStream]::new(
+                    $sslTcp.GetStream(), $false, {$true})
+                $sslStream.AuthenticateAsClient($IP)
+                $cert = $sslStream.RemoteCertificate
+                $sslTcp.Close()
                 if ($cert) {
-                    $exp      = [datetime]::ParseExact($cert.GetExpirationDateString(),"M/d/yyyy H:mm:ss",$null)
-                    $days     = ($exp-(Get-Date)).Days
-                    $cn       = $cert.Subject
-                    if ($days -lt 0)  { Add-R "ssl-cert" "EXPIRED $([Math]::Abs($days))d ago | CN=$cn" $true }
-                    elseif ($days -lt 30) { Add-R "ssl-cert" "Expires in ${days}d | CN=$cn" $true }
-                    else              { Add-R "ssl-cert" "Expires in ${days}d | CN=$cn" }
+                    $certX509  = [System.Security.Cryptography.X509Certificates.X509Certificate2]$cert
+                    $exp       = $certX509.NotAfter
+                    $notBefore = $certX509.NotBefore
+                    $days      = ($exp - (Get-Date)).Days
+                    $cn        = $certX509.Subject
+                    $issuer    = $certX509.Issuer
+                    $proto     = $sslStream.SslProtocol
+                    if ($days -lt 0) {
+                        Add-R "ssl-cert" "EXPIRED $([Math]::Abs($days))d ago | $cn`n      Not valid after: $($exp.ToString('yyyy-MM-dd')) | Protocol: $proto" $true
+                    } elseif ($days -lt 30) {
+                        Add-R "ssl-cert" "Expires in ${days}d (SOON) | $cn" $true
+                    } else {
+                        Add-R "ssl-cert" "Valid ${days}d remaining | $cn`n      Not before: $($notBefore.ToString('yyyy-MM-dd')) | Not after: $($exp.ToString('yyyy-MM-dd')) | Protocol: $proto"
+                    }
+                    # Weak protocol check
+                    if ($proto -in @("Tls","Ssl3","Ssl2")) {
+                        Add-R "ssl-enum-ciphers" "Weak protocol: $proto" $true
+                    }
                 }
-                $resp.Close()
-            } catch {}
+            } else { $sslTcp.Close() }
         } catch {}
     }
 
@@ -1167,9 +1282,21 @@ foreach ($IP in $IPs) {
             $port    = $res.Port
             $state   = $res.State
             $svc     = if ($ServiceDB.ContainsKey($port)) { $ServiceDB[$port] } else { "unknown" }
-            $banner  = if ($doBanner)   { Get-Banner $IP $port $TIMEOUT } else { "" }
-            $version = if ($doBanner)   { Get-Version $banner $port }     else { $svc }
-            $scrs    = if ($doScripts)  { Invoke-Scripts $IP $port $svc $banner $ScriptCats } else { @() }
+            $banner  = if ($doBanner) { Get-Banner $IP $port $TIMEOUT } else { "" }
+
+            # Upgrade service name from banner when port is unknown
+            if ($svc -eq "unknown" -and $banner) {
+                if ($banner -match "^SSH-")                          { $svc = "ssh" }
+                elseif ($banner -match "^220[\s\-].*(FileZilla|ftp)" -and $banner -notmatch "SMTP") { $svc = "ftp" }
+                elseif ($banner -match "^220[\s\-].*(SMTP|ESMTP)")   { $svc = "smtp" }
+                elseif ($banner -match "^HTTP/|Server:\s*\S")        { $svc = "http" }
+                elseif ($banner -match "^\+OK")                      { $svc = "pop3" }
+                elseif ($banner -match "^\* OK")                     { $svc = "imap" }
+                elseif ($banner -match "redis_version")              { $svc = "redis" }
+            }
+
+            $version = if ($doBanner) { Get-Version $banner $port } else { $svc }
+            $scrs    = if ($doScripts) { Invoke-Scripts $IP $port $svc $banner $ScriptCats } else { @() }
 
             $fc = if ($state -eq "open") { "Green" } else { "Yellow" }
             Write-C ("  {0,-9} {1,-14} {2,-18} {3}" -f "$port/tcp", $state, $svc, $version) $fc
@@ -1177,8 +1304,13 @@ foreach ($IP in $IPs) {
                 $tag = if ($s.Vuln) { " [VULN]" } else { "" }
                 $cve = if ($s.CVE)  { " ($($s.CVE))" } else { "" }
                 $col = if ($s.Vuln) { "Red" } else { "DarkGray" }
+                # Handle multiline output — first line on same row as script name, rest indented
+                $outLines = $s.Output -split "`n"
                 Write-C "    |_$($s.Name)$tag$cve" $col
-                Write-Dim "      $($s.Output)"
+                Write-C "      $($outLines[0])" DarkGray
+                for ($li = 1; $li -lt $outLines.Count; $li++) {
+                    Write-C $outLines[$li] DarkGray
+                }
                 if ($s.Vuln) { $globalVulns++ }
             }
             $totalOpen++
