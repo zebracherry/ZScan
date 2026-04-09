@@ -225,6 +225,11 @@ def fingerprint_banner(banner: bytes, port: int) -> str:
             for i, g in enumerate(m.groups(), 1):
                 result = result.replace(f"{{{i}}}", (g or "").strip())
             return result[:80]
+    # For HTTP responses, extract status + server even without a Server: header
+    if "HTTP/" in text[:20]:
+        status_m = re.match(r"HTTP/[\d\.]+ (\d+)", text)
+        st = status_m.group(1) if status_m else "?"
+        return f"HTTP {st}"
     svc = SERVICE_DB.get(port, ("unknown", b""))[0]
     first_line = text.split("\n")[0].strip()[:60]
     if first_line and len(first_line) > 3:
@@ -458,24 +463,15 @@ def udp_scan(ip: str, port: int, timeout: float = 2.0, src_ip: str = "") -> str:
     return PORT_OPEN_FILT
 
 def grab_banner(ip: str, port: int, timeout: float = 3.0) -> bytes:
+    """Grab service banner — tries HTTP probe, then raw read, then TLS."""
     probe    = SERVICE_DB.get(port, ("", b""))[1]
-    ssl_ports = {443, 8443, 993, 995, 465, 636, 6443}
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, port))
-        if port in ssl_ports:
-            try:
-                import ssl as _ssl
-                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
-                ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
-                sock = ctx.wrap_socket(sock, server_hostname=ip)
-            except Exception:
-                pass
-        if probe:
-            sock.send(probe)
+    ssl_ports = {443, 8443, 993, 995, 465, 636, 6443, 44330}
+    http_ports = {80, 8080, 8443, 443, 8888, 8000, 9090, 9200, 5000, 3000,
+                  7070, 8000, 33033, 45332, 45443}
+
+    def _read_all(sock: socket.socket, t: float = 2.0) -> bytes:
         banner = b""
-        sock.settimeout(2.0)
+        sock.settimeout(t)
         try:
             while True:
                 chunk = sock.recv(4096)
@@ -485,11 +481,61 @@ def grab_banner(ip: str, port: int, timeout: float = 3.0) -> bytes:
         except socket.timeout:
             pass
         return banner
+
+    # ── Try plain TCP first ───────────────────────────────────────────────────
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((ip, port))
+
+        # Wrap SSL for known SSL ports
+        if port in ssl_ports:
+            try:
+                import ssl as _ssl
+                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
+                sock = ctx.wrap_socket(sock, server_hostname=ip)
+            except Exception:
+                pass
+
+        # Send HTTP GET for likely HTTP ports, or if we got no probe
+        if port in http_ports or (not probe and port not in {22, 21, 25, 110, 143, 3306, 5432, 6379}):
+            http_probe = f"GET / HTTP/1.0\r\nHost: {ip}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+            try:
+                sock.send(http_probe.encode())
+            except Exception:
+                pass
+        elif probe:
+            sock.send(probe)
+
+        banner = _read_all(sock, timeout)
+        sock.close()
+
+        if banner:
+            return banner
     except Exception:
-        return b""
-    finally:
         try: sock.close()
         except: pass
+
+    # ── Fallback: try TLS wrap on non-standard port if no banner yet ──────────
+    if port not in ssl_ports:
+        try:
+            import ssl as _ssl
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
+            raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw.settimeout(timeout)
+            raw.connect((ip, port))
+            ssl_sock = ctx.wrap_socket(raw, server_hostname=ip)
+            ssl_sock.send(f"GET / HTTP/1.0\r\nHost: {ip}\r\nConnection: close\r\n\r\n".encode())
+            banner = _read_all(ssl_sock, timeout)
+            ssl_sock.close()
+            if banner:
+                return banner
+        except Exception:
+            pass
+
+    return b""
 
 def os_detect(ip: str, timeout: float = 2.0) -> Dict:
     result = {"os": "unknown", "ttl": 0, "method": ""}
@@ -527,7 +573,13 @@ class ScriptResult:
     def __repr__(self):
         tag     = f" [{R}VULN{RST}]"  if self.vuln else ""
         cve_str = f" ({self.cve})"    if self.cve  else ""
-        return f"  |_{B}{self.name}{RST}{tag}{cve_str}\n    {self.output}"
+        lines   = self.output.split("\n")
+        first   = lines[0]
+        rest    = "\n".join(lines[1:]) if len(lines) > 1 else ""
+        out     = f"  |_{B}{self.name}{RST}{tag}{cve_str}\n    {first}"
+        if rest:
+            out += "\n" + rest
+        return out
 
 
 def _http_get(ip: str, port: int, path: str = "/",
@@ -685,19 +737,30 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
         if first_line:
             results.append(ScriptResult("banner", first_line))
 
-    # ─ Service detection helpers ─────────────────────────────────────────────
+    # ─ Service detection helpers — banner-aware so non-standard ports are identified ──
+    _banner_is_http = bool(re.search(r"^HTTP/|Server:\s*\S|<html", banner_str, re.IGNORECASE | re.MULTILINE))
+    _banner_is_ssl  = bool(re.search(r"-----BEGIN CERTIFICATE|subject.*commonName", banner_str, re.IGNORECASE))
+    _banner_is_ftp  = bool(re.search(r"^220[\s\-]", banner_str))
+    _banner_is_ssh  = banner_str.startswith("SSH-")
+    _banner_is_smtp = bool(re.search(r"^220[\s\-].*SMTP|ESMTP", banner_str, re.IGNORECASE))
+
     is_http    = service in ("http","https","http-proxy","https-alt","http-alt") \
-                 or port in (80,8080,8443,443,8888,8000,9090,9200,5000,3000,7070)
+                 or port in (80,8080,8443,443,8888,8000,9090,9200,5000,3000,7070,33033,45332,45443) \
+                 or _banner_is_http
     is_ftp     = service in ("ftp","ftp-proxy","ftps","ftp-data") \
                  or port in FTP_PORTS \
-                 or re.search(r"^220[\s\-]", banner_str)  # banner-based detection
-    is_ssh     = service == "ssh" or port == 22 or banner_str.startswith("SSH-")
+                 or (_banner_is_ftp and not _banner_is_smtp)
+    is_ssh     = service == "ssh" or port == 22 or _banner_is_ssh
     is_smb     = service in ("smb","netbios-ssn","microsoft-ds") or port in (139, 445)
-    is_smtp    = service in ("smtp","submission","smtps") or port in (25, 465, 587)
+    is_smtp    = service in ("smtp","submission","smtps") or port in (25, 465, 587) or _banner_is_smtp
     is_dns     = service == "dns" or port == 53
     is_snmp    = service == "snmp" or port == 161
     is_rdp     = service == "ms-wbt-server" or port == 3389
-    is_ssl     = service in ("https","imaps","pop3s","smtps") or port in (443,8443,993,995,465)
+    # SSL: try if port looks TLS-ish, has ssl/tls in service name, or banner looks like cert
+    is_ssl     = service in ("https","imaps","pop3s","smtps","ssl","tls") \
+                 or port in (443,8443,993,995,465,44330) \
+                 or _banner_is_ssl \
+                 or "ssl" in service.lower()
     is_redis   = service == "redis" or port == 6379
     is_mysql   = service == "mysql" or port == 3306
     is_mongo   = service == "mongod" or port in (27017, 27018)
@@ -727,6 +790,73 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
 
         if "server" in hdrs:
             results.append(ScriptResult("http-server-header", hdrs["server"]))
+
+        # http-methods — always check, flag risky ones
+        try:
+            sock_opt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock_opt.settimeout(5.0); sock_opt.connect((ip, port))
+            sock_opt.send(f"OPTIONS / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
+            opt_resp = b""
+            sock_opt.settimeout(3.0)
+            try:
+                while True:
+                    c = sock_opt.recv(4096)
+                    if not c: break
+                    opt_resp += c
+                    if len(opt_resp) > 8192: break
+            except: pass
+            sock_opt.close()
+            opt_str = opt_resp.decode("utf-8", errors="replace")
+            # Parse Allow header
+            allow_match = re.search(r"(?:Allow|Public):\s*([^\r\n]+)", opt_str, re.IGNORECASE)
+            if allow_match:
+                methods_str = allow_match.group(1).strip()
+                risky = [m.strip() for m in methods_str.split(",")
+                         if m.strip() in ("PUT","DELETE","CONNECT","TRACE","PATCH",
+                                          "PROPFIND","PROPPATCH","COPY","MOVE",
+                                          "MKCOL","LOCK","UNLOCK")]
+                out = f"Supported Methods: {methods_str}"
+                if risky:
+                    out += f"\n    Potentially risky methods: {', '.join(risky)}"
+                results.append(ScriptResult("http-methods", out, vuln=bool(risky)))
+                # http-webdav-scan — if WebDAV methods present
+                webdav_methods = [m.strip() for m in methods_str.split(",")
+                                  if m.strip() in ("PROPFIND","PROPPATCH","MKCOL",
+                                                   "COPY","MOVE","LOCK","UNLOCK")]
+                if webdav_methods:
+                    # Get server date from response
+                    date_match = re.search(r"Date:\s*([^\r\n]+)", opt_str, re.IGNORECASE)
+                    date_str   = date_match.group(1).strip() if date_match else "unknown"
+                    svr        = hdrs.get("server","unknown")
+                    results.append(ScriptResult("http-webdav-scan",
+                        f"WebDAV enabled | Server: {svr} | Date: {date_str}\n"
+                        f"    Allowed: {methods_str}", vuln=True))
+            # http-open-proxy — check if CONNECT method works
+            if "CONNECT" in opt_str:
+                results.append(ScriptResult("http-open-proxy",
+                    "Potentially OPEN proxy — CONNECT method supported", vuln=True))
+        except Exception:
+            pass
+
+        # http-trace check
+        try:
+            sock_tr = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock_tr.settimeout(3.0); sock_tr.connect((ip, port))
+            sock_tr.send(f"TRACE / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
+            tr_resp = b""
+            sock_tr.settimeout(2.0)
+            try:
+                while True:
+                    c = sock_tr.recv(4096)
+                    if not c: break
+                    tr_resp += c
+                    if len(tr_resp) > 4096: break
+            except: pass
+            sock_tr.close()
+            if b"200" in tr_resp[:20]:
+                results.append(ScriptResult("http-trace",
+                    "HTTP TRACE method enabled — XST vulnerability", vuln=True))
+        except: pass
 
         if wants("safe"):
             sec_headers = ["x-frame-options","x-xss-protection","x-content-type-options",
@@ -827,25 +957,6 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
                         f"Internal IP leaked: {priv_ip.group()}", vuln=True))
             except: pass
 
-            st_trace, _, _ = _http_get(ip, port, "/")
-            try:
-                sock_t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock_t.settimeout(3.0); sock_t.connect((ip, port))
-                sock_t.send(f"TRACE / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
-                resp_t = b""
-                try:
-                    while True:
-                        c = sock_t.recv(4096)
-                        if not c: break
-                        resp_t += c
-                        if len(resp_t) > 4096: break
-                except: pass
-                sock_t.close()
-                if b"TRACE / HTTP" in resp_t and b"200" in resp_t[:20]:
-                    results.append(ScriptResult("http-trace",
-                        "HTTP TRACE method enabled", vuln=True))
-            except: pass
-
             for hdr_name in ["x-powered-by","x-aspnet-version","x-aspnetmvc-version"]:
                 if hdr_name in hdrs:
                     results.append(ScriptResult("http-generator",
@@ -894,11 +1005,10 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
             try:
                 logged_in = _ftp_login_anon(sock_a, ftp_timeout)
                 if logged_in:
-                    results.append(ScriptResult("ftp-anon",
-                        "Anonymous FTP login allowed (FTP code 230)", vuln=True))
-                    # PASV directory listing
+                    # PASV directory listing — collect all lines first
                     pasv_resp = _ftp_cmd(sock_a, "PASV", ftp_timeout)
                     dsock     = _ftp_pasv_channel(ip, pasv_resp, ftp_timeout)
+                    listing_lines = []
                     if dsock:
                         _ftp_cmd(sock_a, "LIST", ftp_timeout)
                         raw_list = b""
@@ -911,11 +1021,14 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
                         except socket.timeout:
                             pass
                         dsock.close()
-                        for line in raw_list.decode(errors="replace").strip().splitlines():
-                            results.append(ScriptResult("ftp-anon", f"| {line}"))
+                        listing_lines = raw_list.decode(errors="replace").strip().splitlines()
+                    # Single ScriptResult with full listing embedded
+                    listing_str = "Anonymous FTP login allowed (FTP code 230)"
+                    if listing_lines:
+                        listing_str += "\n" + "\n".join(f"    | {l}" for l in listing_lines)
                     else:
-                        results.append(ScriptResult("ftp-anon",
-                            "| (PASV failed — could not open data channel)"))
+                        listing_str += "\n    | (PASV failed — could not open data channel)"
+                    results.append(ScriptResult("ftp-anon", listing_str, vuln=True))
                 else:
                     results.append(ScriptResult("ftp-anon", "Anonymous login denied"))
             except Exception:
@@ -1503,7 +1616,7 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SSL/TLS cert check
+    # SSL/TLS cert check — tries TLS wrap on any port flagged is_ssl
     # ─────────────────────────────────────────────────────────────────────────
     if is_ssl and wants("default"):
         try:
@@ -1511,27 +1624,46 @@ def run_scripts(ip: str, port: int, service: str, banner: bytes,
             ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
             ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
             raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            raw_sock.settimeout(5.0); raw_sock.connect((ip, port))
+            raw_sock.settimeout(5.0)
+            raw_sock.connect((ip, port))
             ssl_sock = ctx.wrap_socket(raw_sock, server_hostname=ip)
-            cert = ssl_sock.getpeercert()
+            cert     = ssl_sock.getpeercert()
+            # Also grab cipher info
+            cipher_info = ssl_sock.cipher()
             ssl_sock.close()
             if cert:
                 not_after = cert.get("notAfter","")
+                not_before= cert.get("notBefore","")
                 cn_list   = [v for field in cert.get("subject",[]) for k,v in field if k == "commonName"]
+                org_list  = [v for field in cert.get("subject",[]) for k,v in field if k == "organizationName"]
                 cn        = cn_list[0] if cn_list else "?"
+                org       = org_list[0] if org_list else ""
+                org_str   = f" / {org}" if org else ""
                 if not_after:
                     import time as _time
-                    exp = _time.mktime(_time.strptime(not_after, "%b %d %H:%M:%S %Y %Z"))
-                    days_left = int((exp - _time.time()) / 86400)
-                    if days_left < 0:
-                        results.append(ScriptResult("ssl-cert",
-                            f"EXPIRED {abs(days_left)}d ago | CN={cn}", vuln=True))
-                    elif days_left < 30:
-                        results.append(ScriptResult("ssl-cert",
-                            f"Expires in {days_left}d | CN={cn}", vuln=True))
-                    else:
-                        results.append(ScriptResult("ssl-cert",
-                            f"Expires in {days_left}d | CN={cn}"))
+                    try:
+                        exp       = _time.mktime(_time.strptime(not_after, "%b %d %H:%M:%S %Y %Z"))
+                        days_left = int((exp - _time.time()) / 86400)
+                        if days_left < 0:
+                            results.append(ScriptResult("ssl-cert",
+                                f"EXPIRED {abs(days_left)}d ago | CN={cn}{org_str}\n"
+                                f"    Not valid after: {not_after}", vuln=True))
+                        elif days_left < 30:
+                            results.append(ScriptResult("ssl-cert",
+                                f"Expires in {days_left}d (SOON) | CN={cn}{org_str}", vuln=True))
+                        else:
+                            results.append(ScriptResult("ssl-cert",
+                                f"Valid {days_left}d remaining | CN={cn}{org_str}\n"
+                                f"    Not valid before: {not_before} | Not valid after: {not_after}"))
+                    except Exception:
+                        results.append(ScriptResult("ssl-cert", f"CN={cn}{org_str}"))
+            if cipher_info:
+                proto = cipher_info[1] if len(cipher_info) > 1 else "?"
+                if proto in ("TLSv1","TLSv1.0","TLSv1.1","SSLv2","SSLv3"):
+                    results.append(ScriptResult("ssl-enum-ciphers",
+                        f"Weak protocol: {proto}", vuln=True))
+                else:
+                    results.append(ScriptResult("ssl-enum-ciphers", f"Protocol: {proto}"))
         except Exception:
             pass
 
@@ -1633,17 +1765,42 @@ def scan_port(ip: str, port: int, scan_fn, timeout: float,
     state = scan_fn(ip, port, timeout)
     if state != PORT_OPEN:
         return None
-    info: Dict = {"port": port, "state": state}
-    svc_name    = SERVICE_DB.get(port, ("unknown", b""))[0]
+    info: Dict   = {"port": port, "state": state}
+    svc_name     = SERVICE_DB.get(port, ("unknown", b""))[0]
     info["service"] = svc_name
     info["version"] = ""
     info["scripts"] = []
+
     if do_banner:
-        banner          = grab_banner(ip, port, timeout)
-        info["banner"]  = banner.decode("utf-8", errors="replace")[:200]
+        banner = grab_banner(ip, port, timeout)
+        banner_text = banner.decode("utf-8", errors="replace")
+
+        # Upgrade service name from banner when port is unknown
+        if svc_name == "unknown":
+            if re.search(r"^SSH-", banner_text):
+                svc_name = "ssh"
+            elif re.search(r"^220[\s\-].*FileZilla|^220[\s\-].*ftp|^220[\s\-].*FTP", banner_text, re.IGNORECASE):
+                svc_name = "ftp"
+            elif re.search(r"^220[\s\-].*SMTP|ESMTP", banner_text, re.IGNORECASE):
+                svc_name = "smtp"
+            elif "HTTP/" in banner_text[:20] or "Server:" in banner_text[:500]:
+                if port in (443, 8443, 44330) or "ssl" in banner_text.lower()[:100]:
+                    svc_name = "https"
+                else:
+                    svc_name = "http"
+            elif re.search(r"^\+OK|^\-ERR", banner_text):
+                svc_name = "pop3"
+            elif re.search(r"^\* OK|^\* BYE", banner_text):
+                svc_name = "imap"
+            elif re.search(r"redis_version", banner_text):
+                svc_name = "redis"
+            info["service"] = svc_name
+
+        info["banner"]  = banner_text[:200]
         info["version"] = fingerprint_banner(banner, port)
     else:
         banner = b""
+
     if do_scripts:
         script_results   = run_scripts(ip, port, svc_name, banner, script_cats)
         info["scripts"]  = [{"name": r.name, "output": r.output,
