@@ -1,12 +1,32 @@
-# ⚡ ZScan — Air-gap Safe Network Scanner v1.0.0
+# ⚡ ZScan — Air-gap Safe Network Scanner v2.0.0
 
-> **Full NSE-suite network scanner — 86 embedded scripts, zero installs, works completely offline**
+> **Full NSE-suite network scanner — 90+ embedded scripts, zero installs, works completely offline**
+
+---
+
+## What's New in v2.0
+
+| Area | Improvement |
+|---|---|
+| **FTP** | Full anonymous login + PASV directory listing (mirrors `nmap ftp-anon`) |
+| **FTP** | `SYST` command, bounce check, vsftpd 2.3.4 backdoor (CVE-2011-2523) |
+| **FTP** | Non-standard port detection via banner (`30021`, `2121`, etc.) |
+| **SSH** | Improved hostkey + SSHv1 weak version detection |
+| **SMB** | Improved EternalBlue / DoublePulsar detection |
+| **DNS** | Recursion check + zone transfer (AXFR) probe |
+| **SNMP** | Community string brute (public/private/community/manager/admin) |
+| **NTP** | Server info + monlist DDoS amplification check (CVE-2013-5211) |
+| **Rsync** | Unauthenticated module listing |
+| **Docker** | Unauthenticated remote API exposure check |
+| **Kubernetes** | API server + Kubelet unauthenticated access check |
+| **Modbus** | ICS/SCADA device exposure (port 502) |
+| **Output** | Vuln summary count in terminal output |
 
 ---
 
 ## Two versions, one tool
 
-| | `zscan.py` | `zscan.ps1` |
+|  | `zscan.py` | `zscan.ps1` |
 |---|---|---|
 | **Platform** | Linux + Windows | Windows only |
 | **Requires** | Python 3.6+ (stdlib only) | PowerShell 5.1+ (built-in on Win10+) |
@@ -16,9 +36,8 @@
 | **UDP scan** | ✅ root | ✅ limited |
 | **Version detection** | ✅ | ✅ |
 | **OS detection (TTL)** | ✅ | ✅ |
-| **Embedded NSE scripts** | ✅ **86 scripts** | ✅ **52 scripts** |
+| **Embedded scripts** | ✅ **90+ scripts** | ✅ **55+ scripts** |
 | **Output formats** | Terminal / JSON / XML / Grepable | Terminal / JSON / HTML / CSV |
-| **Speed at -T4** | ~10k ports/sec | ~3k ports/sec |
 | **Air-gap safe** | ✅ stdlib only | ✅ .NET built-in only |
 
 ---
@@ -26,27 +45,50 @@
 ## Quick Start
 
 ### Python — Linux / Windows
+
 ```bash
-python3 zscan.py 192.168.1.1                                    # default top-1000 scan
-python3 zscan.py 192.168.1.0/24 -sn -T4                         # ping sweep
-python3 zscan.py 192.168.1.1 -sT -sV --script default           # version + basic scripts
-sudo python3 zscan.py 10.0.0.1 -sS -p 1-1024 -O --script all   # full SYN + OS + all scripts
-sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ r.json # all ports + JSON output
+# Basic top-1000 scan
+python3 zscan.py 192.168.1.1
+
+# Ping sweep
+python3 zscan.py 192.168.1.0/24 -sn -T4
+
+# Version + default scripts
+python3 zscan.py 192.168.1.1 -sT -sV --script default
+
+# Non-standard FTP port (e.g. 30021) — full anon check + listing
+python3 zscan.py 192.168.164.127 -p 30021 --script all -sV
+
+# Full SYN + OS + all scripts
+sudo python3 zscan.py 10.0.0.1 -sS -p 1-1024 -O --script all
+
+# All ports + JSON output
+sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json
 ```
 
-### PowerShell — Windows (no Python needed)
+### PowerShell — Windows
+
 ```powershell
-.\zscan.ps1 -Target 192.168.1.1                                          # default scan
-.\zscan.ps1 -Target 192.168.1.0/24 -ScanType Ping                        # ping sweep
-.\zscan.ps1 -Target 10.0.0.1 -Ports "1-1024" -ServiceDetection -Scripts vuln -OutputHTML r.html
-.\zscan.ps1 -Target 10.0.0.1 -ServiceDetection -OSDetect -Scripts all -OutputJSON r.json -OutputCSV r.csv
+# Basic scan
+.\zscan.ps1 -Target 192.168.1.1
+
+# Ping sweep
+.\zscan.ps1 -Target 192.168.1.0/24 -ScanType Ping
+
+# Non-standard FTP port
+.\zscan.ps1 -Target 192.168.164.127 -Ports "30021" -ServiceDetection -Scripts all
+
+# Full scan with HTML output
+.\zscan.ps1 -Target 10.0.0.1 -Ports "1-1024" -ServiceDetection -OSDetect -Scripts all -OutputHTML report.html
+
+# JSON + CSV output
+.\zscan.ps1 -Target 10.0.0.0/24 -T 4 -Scripts vuln -OutputJSON scan.json -OutputCSV scan.csv
 ```
 
 ---
 
-## Scan Types
+## Scan Types (Python)
 
-### Python
 | Flag | Type | Root? |
 |---|---|---|
 | `-sS` | TCP SYN (fast, stealthy) | ✅ |
@@ -57,13 +99,11 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ r.json # all ports + JS
 | `-sX` | XMAS scan | ✅ |
 | `-sn` | Ping sweep only | ❌ |
 
-### PowerShell
-`-ScanType TCP` (default) · `-ScanType UDP` · `-ScanType Ping`
-
 ---
 
 ## Timing Templates
-| | Workers | Timeout | Use case |
+
+| Level | Workers | Timeout | Use case |
 |---|---|---|---|
 | `-T0` paranoid | 10 | 5s | Maximum stealth |
 | `-T1` sneaky | 50 | 3s | IDS evasion |
@@ -74,129 +114,42 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ r.json # all ports + JS
 
 ---
 
-## Embedded Scripts — Full NSE Suite (86 Python / 52 PowerShell)
+## Embedded Scripts
+
+### FTP
+| Script | Notes |
+|---|---|
+| `ftp-anon` | Anonymous login + full PASV directory listing |
+| `ftp-syst` | OS fingerprint via SYST command |
+| `ftp-bounce` | PORT-command bounce test |
+| `ftp-vsftpd-backdoor` | vsftpd 2.3.4 backdoor — CVE-2011-2523 |
 
 ### HTTP / HTTPS
-| Script | Category | CVE |
-|---|---|---|
-| http-title | default | |
-| http-server-header | default | |
-| http-methods | safe | |
-| http-security-headers | safe | |
-| http-cors | safe | |
-| http-waf-detect | safe | |
-| http-auth | default | |
-| http-robots.txt | safe | |
-| http-cookie-flags | safe | |
-| http-cross-domain-policy | safe | |
-| http-generator | safe | |
-| http-php-version | safe | |
-| http-apache-server-status | discovery | |
-| http-git | vuln | |
-| http-passwd | vuln | |
-| http-shellshock | vuln | CVE-2014-6271 |
-| http-open-redirect | vuln | |
-| http-internal-ip-disclosure | vuln | |
-| http-trace | vuln | |
-| http-webdav-scan | vuln | |
-| http-aspnet-debug | vuln | |
-| http-default-accounts | auth | |
-| http-enum | discovery | |
-| http-spring-boot-actuator | vuln | |
-| http-wordpress-users | discovery | |
-| http-drupal-enum | vuln | CVE-2014-3704 |
-| http-vuln-cve2012-1823 | vuln | CVE-2012-1823 |
-| http-vuln-cve2017-5638 | vuln | CVE-2017-5638 |
-| http-vuln-cve2010-0738 | vuln | CVE-2010-0738 |
-| http-iis-short-name-brute | vuln | |
+`http-title` · `http-server-header` · `http-methods` · `http-security-headers` · `http-cors` · `http-waf-detect` · `http-auth` · `http-robots.txt` · `http-cookie-flags` · `http-cross-domain-policy` · `http-generator` · `http-php-version` · `http-git` · `http-passwd` · `http-shellshock (CVE-2014-6271)` · `http-open-redirect` · `http-internal-ip-disclosure` · `http-trace` · `http-webdav-scan` · `http-aspnet-debug` · `http-default-accounts` · `http-enum` · `http-spring-boot-actuator` · `http-wordpress-users` · `http-vuln-cve2012-1823` · `http-vuln-cve2017-5638` · `http-vuln-cve2010-0738`
 
 ### SMB / NetBIOS
-| Script | CVE |
-|---|---|
-| smb-os-discovery | |
-| smb-protocols (SMBv1 detection) | |
-| smb-vuln-ms17-010 (EternalBlue) | CVE-2017-0144 |
-| smb-double-pulsar-backdoor | |
-| smb2-time | |
-| nbstat | |
+`smb-os-discovery` · `smb-protocols (SMBv1 detection)` · `smb-vuln-ms17-010 (EternalBlue) CVE-2017-0144` · `smb-double-pulsar-backdoor` · `smb2-time` · `nbstat`
 
-### SSH / FTP / SMTP
-| Script | CVE |
-|---|---|
-| ssh-hostkey | |
-| ssh-auth-methods | |
-| ssh-weak-version (SSHv1) | CVE-2001-0553 |
-| ftp-anon | |
-| ftp-syst | |
-| ftp-vsftpd-backdoor | CVE-2011-2523 |
-| smtp-commands | |
-| smtp-open-relay | |
-| smtp-enum-users (VRFY) | |
+### SSH / SMTP
+`ssh-hostkey` · `ssh-auth-methods` · `ssh-weak-version (SSHv1) CVE-2001-0553` · `smtp-commands` · `smtp-open-relay` · `smtp-enum-users (VRFY)`
 
 ### Database Services
-| Script | Notes |
-|---|---|
-| mysql-info | Version fingerprint |
-| pgsql-empty-password | Auth bypass check |
-| ms-sql-info | TDS probe |
-| redis-info | Unauthenticated access |
-| mongodb-info | Unauthenticated access |
-| elasticsearch-info | Unauthenticated access |
-| memcached-info | Unauthenticated access |
-| cassandra-info | CQL auth check |
-| couchdb-databases | Unauthenticated + list DBs |
+`mysql-info` · `pgsql-empty-password` · `ms-sql-info` · `redis-info` · `mongodb-info` · `elasticsearch-info` · `memcached-info` · `cassandra-info` · `couchdb-databases`
 
 ### Network Services
-| Script | Notes |
-|---|---|
-| dns-recursion | Open resolver |
-| dns-zone-transfer | AXFR check |
-| ntp-info | Version + time |
-| ntp-monlist | CVE-2013-5211 DDoS amplification |
-| snmp-info | Community string brute (public/private) |
-| ldap-rootdse | Anonymous bind |
-| rsync-list-modules | Unauthenticated module listing |
-| finger | User enumeration |
-| telnet-ntlm-info | Cleartext protocol banner |
-| imap-capabilities | IMAP feature list |
-| pop3-capabilities | POP3 feature list |
-| sip-methods | VoIP OPTIONS probe |
-| rtsp-methods | Streaming server OPTIONS |
-| mqtt-subscribe | Broker anonymous access |
-| krb5-enum-users | Kerberos AS-REQ probe |
+`dns-recursion` · `dns-zone-transfer` · `ntp-info` · `ntp-monlist (CVE-2013-5211)` · `snmp-info` · `ldap-rootdse` · `rsync-list-modules` · `finger` · `telnet-ntlm-info` · `imap-capabilities` · `pop3-capabilities` · `sip-methods` · `rtsp-methods` · `mqtt-subscribe` · `krb5-enum-users`
 
-### SSL/TLS
-| Script | Notes |
-|---|---|
-| ssl-cert | Expiry + CN |
-| ssl-enum-ciphers | Weak TLS version |
+### SSL / TLS
+`ssl-cert` (expiry + CN) · `ssl-enum-ciphers` (weak TLS)
 
 ### Remote Access
-| Script | Notes |
-|---|---|
-| rdp-enum-encryption | NLA vs classic |
-| rdp-vuln-ms12-020 | CVE-2012-0152 |
-| vnc-info | Version |
-| realvnc-auth-bypass | CVE-2006-2369 |
-| ipmi-version | RMCP probe |
-| ipmi-cipher-zero | CVE-2013-4786 |
+`rdp-enum-encryption` · `rdp-vuln-ms12-020 (CVE-2012-0152)` · `vnc-info` · `realvnc-auth-bypass (CVE-2006-2369)` · `ipmi-version` · `ipmi-cipher-zero (CVE-2013-4786)`
 
 ### ICS / SCADA
-| Script | Notes |
-|---|---|
-| modbus-discover | Port 502 — ICS/SCADA exposure |
-| s7-info | Siemens S7 PLC port 102 |
+`modbus-discover` (port 502) · `s7-info` (Siemens S7 PLC port 102)
 
 ### Infrastructure / DevOps
-| Script | Notes |
-|---|---|
-| docker-version | Unauthenticated Docker API (port 2375/2376) |
-| kubernetes-api | Unauthenticated K8s API |
-| kubernetes-kubelet | Unauthenticated Kubelet |
-| hadoop-namenode-info | Hadoop web UI |
-| jdwp-version | Java debug port RCE |
-| distcc-cve2004-2687 | Remote compile daemon |
-| epmd-info | Erlang node listing |
+`docker-version` · `kubernetes-api` · `kubernetes-kubelet` · `hadoop-namenode-info` · `jdwp-version` · `distcc-cve2004-2687` · `epmd-info`
 
 ---
 
@@ -222,12 +175,29 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ r.json # all ports + JS
 
 | Check | Python | PowerShell |
 |---|---|---|
-| External imports | ✅ stdlib only | ✅ System.Net.Sockets only |
+| External imports | ✅ stdlib only | ✅ System.Net only |
 | Package manager calls | ✅ None | ✅ None |
 | Auto-downloads | ✅ None | ✅ None |
 | Outbound connections | ✅ Only to your targets | ✅ Only to your targets |
 
 Copy a single file to the target. Run. Done.
+
+---
+
+## Install
+
+```bash
+# Linux — run from anywhere
+sudo cp zscan.py /usr/local/bin/zscan
+sudo chmod +x /usr/local/bin/zscan
+zscan 192.168.1.1 --script all
+```
+
+```powershell
+# Windows — allow local scripts
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.\zscan.ps1 -Target 192.168.1.1 -Scripts all
+```
 
 ---
 
