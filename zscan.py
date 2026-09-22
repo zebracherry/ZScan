@@ -7,9 +7,18 @@
 ███████╗███████║╚██████╗██║  ██║██║ ╚████║
 ╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝
 
-ZScan — Air-gap Safe Network Scanner  v2.0.0
+ZScan — Air-gap Safe Network Scanner  v2.1.0
 Platform : Linux / Windows (Python 3.6+)
 License  : MIT
+
+WHAT'S NEW IN v2.1:
+  • HTTP: http-methods (risky OPTIONS), http-webdav-scan, http-open-proxy, http-trace (XST)
+  • Full HTTP script suite now runs on non-standard ports (e.g. 33033, 45443)
+  • SSL: cert/protocol check works on any port; TLS 1.0 / SSL3 flagged as weak
+  • Service: banner-based name upgrade for unknown ports (http/ftp/ssh etc.)
+  • Fix: default port set (TOP_1000) now includes high service ports (RDP/MySQL/Mongo/Redis/…)
+  • Fix: XML output is now properly escaped (well-formed on any banner content)
+  • Fix: invalid/out-of-range port specs are rejected with a clear message
 
 WHAT'S NEW IN v2.0:
   • FTP: full anonymous login + PASV directory listing (mirrors nmap ftp-anon)
@@ -59,11 +68,12 @@ import sys
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
+from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_attr
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-VERSION    = "2.0.0"
+VERSION    = "2.1.0"
 TOOL       = "ZScan"
 IS_WINDOWS = platform.system() == "Windows"
 IS_ROOT    = (os.geteuid() == 0) if not IS_WINDOWS else False
@@ -84,7 +94,21 @@ TOP_100 = [
     5190,5357,5432,5631,5666,5800,5985,6000,6001,6646,7070,
     8008,8009,8010,8031,8181,8192,49152,49153,49154,49155,49156,
 ]
-TOP_1000 = sorted(set(TOP_100 + list(range(1, 1024))))[:1000]
+# High-value service ports above 1024 that must always be in the default scan —
+# these are exactly the services the embedded scripts target. The previous
+# sorted(...)[:1000] slice silently dropped every one of them.
+HIGH_VALUE_PORTS = [
+    1080,1099,1194,1433,1521,1723,1883,2049,2082,2083,2086,2087,2095,2096,
+    2121,2181,2222,2375,2376,2379,2483,2484,3000,3128,3268,3269,3306,3389,
+    3690,4444,4567,4711,4786,4899,5000,5001,5044,5060,5061,5222,5432,5555,
+    5601,5672,5900,5901,5984,5985,5986,6000,6379,6443,6660,6667,7001,7002,
+    7070,7077,7199,7473,7474,7687,8000,8008,8009,8010,8020,8025,8080,8081,
+    8086,8088,8089,8090,8091,8123,8161,8180,8181,8443,8500,8530,8531,8686,
+    8880,8888,8983,9000,9042,9090,9092,9100,9200,9300,9418,9443,9990,9999,
+    10000,10250,10255,11211,15672,16010,16992,16993,27017,27018,27019,28017,
+    32764,44330,49152,49153,49154,49155,49156,50000,50070,54321,61616,
+]
+TOP_1000 = sorted(set(range(1, 1025)) | set(TOP_100) | set(HIGH_VALUE_PORTS))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVICE DATABASE
@@ -1700,16 +1724,34 @@ def parse_targets(target_str: str) -> List[str]:
     return targets
 
 def parse_ports(port_str: str) -> List[int]:
-    if port_str == "-":
+    if port_str.strip() == "-":
         return list(range(1, 65536))
+
+    def _valid(n: int) -> int:
+        if not 1 <= n <= 65535:
+            raise ValueError(f"port out of range (1-65535): {n}")
+        return n
+
     ports = set()
     for part in port_str.split(","):
         part = part.strip()
-        if "-" in part:
-            a, b = part.split("-", 1)
-            ports.update(range(int(a), int(b) + 1))
-        else:
-            ports.add(int(part))
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                a, b = part.split("-", 1)
+                lo, hi = _valid(int(a)), _valid(int(b))
+                if lo > hi:
+                    lo, hi = hi, lo
+                ports.update(range(lo, hi + 1))
+            else:
+                ports.add(_valid(int(part)))
+        except ValueError as e:
+            print(f"{Y}[!] Invalid port spec '{part}': {e}{RST}")
+            sys.exit(1)
+    if not ports:
+        print(f"{Y}[!] No valid ports specified{RST}")
+        sys.exit(1)
     return sorted(ports)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1721,22 +1763,26 @@ def write_json(data: Dict, path: str):
     print(f"{G}[+] JSON output written to {path}{RST}")
 
 def write_xml(data: Dict, path: str):
+    def a(v):  # escape an attribute value (returns quoted, e.g. "foo")
+        return _xml_attr("" if v is None else str(v))
+    def t(v):  # escape element text
+        return _xml_escape("" if v is None else str(v))
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
-             f'<zscan version="{VERSION}" start="{data.get("start_time","")}" '
-             f'elapsed="{data.get("elapsed","")}" target="{data.get("target","")}">']
+             f'<zscan version={a(VERSION)} start={a(data.get("start_time",""))} '
+             f'elapsed={a(data.get("elapsed",""))} target={a(data.get("target",""))}>']
     for host in data.get("hosts", []):
-        lines.append(f'  <host ip="{host["ip"]}" os="{host.get("os","")}" '
-                     f'ttl="{host.get("ttl","")}">')
+        lines.append(f'  <host ip={a(host["ip"])} os={a(host.get("os",""))} '
+                     f'ttl={a(host.get("ttl",""))}>')
         for port_info in host.get("ports", []):
-            lines.append(f'    <port number="{port_info["port"]}" '
-                         f'state="{port_info["state"]}" '
-                         f'service="{port_info["service"]}" '
-                         f'version="{port_info.get("version","")}">')
+            lines.append(f'    <port number={a(port_info["port"])} '
+                         f'state={a(port_info["state"])} '
+                         f'service={a(port_info["service"])} '
+                         f'version={a(port_info.get("version",""))}>')
             for sr in port_info.get("scripts", []):
-                lines.append(f'      <script name="{sr.get("name","")}" '
-                             f'vuln="{sr.get("vuln",False)}" '
-                             f'cve="{sr.get("cve","")}">'
-                             f'{sr.get("output","")}</script>')
+                lines.append(f'      <script name={a(sr.get("name",""))} '
+                             f'vuln={a(sr.get("vuln",False))} '
+                             f'cve={a(sr.get("cve",""))}>'
+                             f'{t(sr.get("output",""))}</script>')
             lines.append("    </port>")
         lines.append("  </host>")
     lines.append("</zscan>")
