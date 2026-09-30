@@ -1305,12 +1305,12 @@ foreach ($IP in $IPs) {
                 elseif ($banner -match "redis_version")              { $svc = "redis" }
             }
 
-            $version = if ($doBanner) { Get-Version $banner $port } else { $svc }
-            $version = Clean-Text $version
+            $svcVersion = if ($doBanner) { Get-Version $banner $port } else { $svc }
+            $svcVersion = Clean-Text $svcVersion
             $scrs    = if ($doScripts) { Invoke-Scripts $IP $port $svc $banner $ScriptCats } else { @() }
 
             $fc = if ($state -eq "open") { "Green" } else { "Yellow" }
-            Write-C ("  {0,-9} {1,-14} {2,-18} {3}" -f "$port/tcp", $state, $svc, $version) $fc
+            Write-C ("  {0,-9} {1,-14} {2,-18} {3}" -f "$port/tcp", $state, $svc, $svcVersion) $fc
             foreach ($s in $scrs) {
                 $tag = if ($s.Vuln) { " [VULN]" } else { "" }
                 $cve = if ($s.CVE)  { " ($($s.CVE))" } else { "" }
@@ -1329,7 +1329,7 @@ foreach ($IP in $IPs) {
                 Port    = $port
                 State   = $state
                 Service = $svc
-                Version = $version
+                Version = $svcVersion
                 Banner  = Clean-Text $($banner.Substring(0,[Math]::Min(200,$banner.Length)))
                 Scripts = $scrs
             })
