@@ -70,6 +70,21 @@ import time
 from typing import Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as _xml_escape, quoteattr as _xml_attr
 
+# Service banners are raw bytes: MySQL's handshake and Modbus replies contain
+# NUL and other control characters. XML 1.0 forbids those outright - they cannot
+# be escaped as entities - so writing them straight out produced a document that
+# no parser would read. Render them as a visible \xNN instead of dropping them,
+# so the fingerprint information survives.
+_XML_ILLEGAL = re.compile(
+    "[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]")
+
+
+def _sanitize(value) -> str:
+    """Make text safe for XML/CSV/terminal while keeping it human-readable."""
+    if value is None:
+        return ""
+    return _XML_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), str(value))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -590,7 +605,9 @@ def os_detect(ip: str, timeout: float = 2.0) -> Dict:
 class ScriptResult:
     def __init__(self, name: str, output: str, vuln: bool = False, cve: str = ""):
         self.name   = name
-        self.output = output
+        # Single chokepoint: both the terminal view and the JSON/XML/CSV writers
+        # read self.output, and raw banner bytes were reaching all of them.
+        self.output = _sanitize(output)
         self.vuln   = vuln
         self.cve    = cve
 
@@ -1764,9 +1781,9 @@ def write_json(data: Dict, path: str):
 
 def write_xml(data: Dict, path: str):
     def a(v):  # escape an attribute value (returns quoted, e.g. "foo")
-        return _xml_attr("" if v is None else str(v))
+        return _xml_attr(_sanitize(v))
     def t(v):  # escape element text
-        return _xml_escape("" if v is None else str(v))
+        return _xml_escape(_sanitize(v))
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              f'<zscan version={a(VERSION)} start={a(data.get("start_time",""))} '
              f'elapsed={a(data.get("elapsed",""))} target={a(data.get("target",""))}>']
@@ -1842,8 +1859,8 @@ def scan_port(ip: str, port: int, scan_fn, timeout: float,
                 svc_name = "redis"
             info["service"] = svc_name
 
-        info["banner"]  = banner_text[:200]
-        info["version"] = fingerprint_banner(banner, port)
+        info["banner"]  = _sanitize(banner_text[:200])
+        info["version"] = _sanitize(fingerprint_banner(banner, port))
     else:
         banner = b""
 
@@ -1899,6 +1916,11 @@ def run_scan(args) -> Dict:
 
     # Targets
     targets = parse_targets(args.target)
+    if not targets:
+        # Previously the scan just did nothing and still exited 0, so a wrapper
+        # script or CI job could not tell a typo'd target from a clean scan.
+        print(f"{R}[!] No scannable target resolved from: {args.target}{RST}")
+        sys.exit(1)
 
     # Banner / version
     do_banner  = args.sV or bool(args.script)

@@ -271,6 +271,24 @@ function Test-UDPPort([string]$IP, [int]$Port, [int]$TMs=2000) {
 # ─────────────────────────────────────────────────────────────────────────────
 # BANNER GRABBING  (v2.1: HTTP probe on unknown ports + TLS fallback)
 # ─────────────────────────────────────────────────────────────────────────────
+# Service banners are raw bytes - MySQL's handshake and Modbus replies carry
+# NUL and other control characters, which leaked into the CSV and HTML reports
+# and made the terminal output register as a binary file. Render them as a
+# visible \xNN so the fingerprint survives but the text stays printable.
+function Clean-Text([string]$Text) {
+    if ([string]::IsNullOrEmpty($Text)) { return "" }
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($ch in $Text.ToCharArray()) {
+        $code = [int]$ch
+        if (($code -lt 0x20 -and $code -ne 0x09 -and $code -ne 0x0A -and $code -ne 0x0D) -or $code -eq 0x7f) {
+            [void]$sb.Append(("\x{0:x2}" -f $code))
+        } else {
+            [void]$sb.Append($ch)
+        }
+    }
+    return $sb.ToString()
+}
+
 function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
     $SslPorts  = @(443,8443,993,995,465,636,44330)
     $HttpPorts = @(80,8080,8443,443,8888,9090,9200,5000,3000,7070,8000,
@@ -541,7 +559,9 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
     $runAll  = $Categories -contains "all" -or $Categories.Count -eq 0
     function Wants([string]$c) { return $runAll -or $Categories -contains $c }
     function Add-R([string]$Name,[string]$Out,[bool]$Vuln=$false,[string]$CVE="") {
-        $results.Add([PSCustomObject]@{Name=$Name;Output=$Out;Vuln=$Vuln;CVE=$CVE})
+        # Clean here so every consumer (terminal, JSON, CSV, HTML) gets printable
+        # text: raw banner bytes were reaching the HTML and CSV reports.
+        $results.Add([PSCustomObject]@{Name=$Name;Output=(Clean-Text $Out);Vuln=$Vuln;CVE=$CVE})
     }
 
     # Service detection — banner-based so non-standard ports are identified correctly
@@ -678,7 +698,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 if ($optStr -match "(?:Allow|Public):\s*([^\r\n]+)") {
                     $methodsStr  = $Matches[1].Trim()
                     $riskyList   = @("PUT","DELETE","CONNECT","TRACE","PATCH","PROPFIND","PROPPATCH","COPY","MOVE","MKCOL","LOCK","UNLOCK")
-                    $risky       = $methodsStr -split "," | ForEach-Object {$_.Trim()} | Where-Object {$_ -in $riskyList}
+                    $risky       = @($methodsStr -split "," | ForEach-Object {$_.Trim()} | Where-Object {$_ -in $riskyList})
                     $out         = "Supported Methods: $methodsStr"
                     if ($risky) { $out += "`n      Potentially risky: $($risky -join ', ')" }
                     Add-R "http-methods" $out ($risky.Count -gt 0)
@@ -1165,19 +1185,25 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
 # ─────────────────────────────────────────────────────────────────────────────
 $startTime = Get-Date
 $tStart    = [System.Diagnostics.Stopwatch]::StartNew()
-$IPs       = Expand-Targets $Target
+# @() so .Count is always valid: PowerShell unrolls a single-element
+# return value to a scalar, and under StrictMode scalar .Count throws.
+$IPs       = @(Expand-Targets $Target)
 
 # Resolve port list
 if ($Ports -ne "") {
-    $PortList = Expand-Ports $Ports
+    $PortList = @(Expand-Ports $Ports)
 } elseif ($TopPorts -gt 0) {
-    $PortList = if ($TopPorts -ge 1000) { $Top1000 } elseif ($TopPorts -ge 100) { $Top100 } else { $Top100 | Select-Object -First $TopPorts }
+    $PortList = @(if ($TopPorts -ge 1000) { $Top1000 } elseif ($TopPorts -ge 100) { $Top100 } else { $Top100 | Select-Object -First $TopPorts })
 } else {
-    $PortList = $Top1000
+    $PortList = @($Top1000)
 }
 
-$ScriptCats = if ($Scripts -ne "") { $Scripts -split "," | ForEach-Object {$_.Trim().ToLower()} } else { @() }
-$doScripts  = $ScriptCats.Count -gt 0 -or $Scripts -ne ""
+$ScriptCats = @(if ($Scripts -ne "") { $Scripts -split "," | ForEach-Object {$_.Trim().ToLower()} } else { @() })
+# Do not ask a possibly-scalar value for .Count here: with a single category
+# (-Scripts all) $ScriptCats used to be a String, scalar .Count threw under
+# StrictMode, SilentlyContinue hid it, the assignment aborted and $doScripts
+# stayed $null — so -Scripts was silently ignored and no script ever ran.
+$doScripts  = $Scripts -ne ""
 $doBanner   = $ServiceDetection -or $doScripts
 
 # Print banner
@@ -1222,34 +1248,6 @@ foreach ($IP in $IPs) {
     # Thread pool scan
     $portResults = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
     $jobs        = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
-
-    $scriptBlock = {
-        param($ip, $port, $scanType, $TMs, $doBanner, $doScripts, $scriptCats, $ServiceDB)
-        $state = switch ($scanType) {
-            "UDP" { Test-UDPPort $ip $port $TMs }
-            default { Test-TCPPort $ip $port $TMs }
-        }
-        if ($state -ne "open" -and $state -ne "open|filtered") { return $null }
-        $svc     = if ($ServiceDB.ContainsKey($port)) { $ServiceDB[$port] } else { "unknown" }
-        $banner  = ""
-        $version = $svc
-        if ($doBanner) {
-            $banner  = Get-Banner $ip $port $TMs
-            $version = Get-Version $banner $port
-        }
-        $scripts = @()
-        if ($doScripts -and $banner -ne $null) {
-            $scripts = Invoke-Scripts $ip $port $svc $banner $scriptCats
-        }
-        return [PSCustomObject]@{
-            Port     = $port
-            State    = $state
-            Service  = $svc
-            Version  = $version
-            Banner   = $banner
-            Scripts  = $scripts
-        }
-    }
 
     # Throttled parallel execution using RunspacePool
     $rsPool = [runspacefactory]::CreateRunspacePool(1, $WORKERS)
@@ -1308,6 +1306,7 @@ foreach ($IP in $IPs) {
             }
 
             $version = if ($doBanner) { Get-Version $banner $port } else { $svc }
+            $version = Clean-Text $version
             $scrs    = if ($doScripts) { Invoke-Scripts $IP $port $svc $banner $ScriptCats } else { @() }
 
             $fc = if ($state -eq "open") { "Green" } else { "Yellow" }
@@ -1331,7 +1330,7 @@ foreach ($IP in $IPs) {
                 State   = $state
                 Service = $svc
                 Version = $version
-                Banner  = $banner.Substring(0,[Math]::Min(200,$banner.Length))
+                Banner  = Clean-Text $($banner.Substring(0,[Math]::Min(200,$banner.Length)))
                 Scripts = $scrs
             })
         }
