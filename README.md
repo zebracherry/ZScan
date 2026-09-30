@@ -1,6 +1,6 @@
 # ⚡ ZScan — Air-gap Safe Network Scanner v2.1.0
 
-> **Full NSE-suite network scanner — 95+ embedded scripts, zero installs, works completely offline**
+> **Full NSE-suite network scanner — 58 embedded scripts, zero installs, works completely offline**
 
 ---
 
@@ -52,7 +52,7 @@
 | **UDP scan** | ✅ root | ✅ limited |
 | **Version detection** | ✅ | ✅ |
 | **OS detection (TTL)** | ✅ | ✅ |
-| **Embedded scripts** | ✅ **95+ scripts** | ✅ **60+ scripts** |
+| **Embedded scripts** | ✅ **58 scripts** | ✅ **48 scripts** |
 | **Output formats** | Terminal / JSON / XML / Grepable | Terminal / JSON / HTML / CSV |
 | **Air-gap safe** | ✅ stdlib only | ✅ .NET built-in only |
 
@@ -138,6 +138,11 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json
 
 ## Embedded Scripts
 
+### Generic
+| Script | Notes |
+|---|---|
+| `banner` | First line of the service banner, on every port that returns one |
+
 ### FTP
 | Script | Notes |
 |---|---|
@@ -169,16 +174,12 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json
 | `http-spring-boot-actuator` | Spring Boot `/actuator` exposure |
 | `http-wordpress-users` | WordPress user enumeration via REST API |
 | `http-enum` | Common sensitive path brute (admin / phpmyadmin / .env etc.) |
-| `http-open-redirect` | Redirect parameter injection |
-| `http-vuln-cve2017-5638` | Apache Struts RCE |
-| `http-vuln-cve2012-1823` | PHP-CGI argument injection |
 
 ### SMB / NetBIOS
 | Script | Notes |
 |---|---|
 | `smb-protocols` | SMBv1 detection |
 | `smb-vuln-ms17-010` | EternalBlue / WannaCry — CVE-2017-0144 |
-| `smb-double-pulsar-backdoor` | DoublePulsar implant check |
 
 ### SSH / SMTP
 | Script | Notes |
