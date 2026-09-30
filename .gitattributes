@@ -1,0 +1,21 @@
+# zscan.py is executed on Linux. A Windows clone with core.autocrlf=true (the
+# Git-for-Windows default) rewrites it to CRLF, and the shebang line then ends
+# in a carriage return:
+#
+#     $ ./zscan.py
+#     env: 'python3\r': No such file or directory
+#
+# Forcing LF on checkout keeps the file runnable whichever OS it was cloned or
+# downloaded on before being copied to the target host.
+* text=auto eol=lf
+
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+
+# zscan.ps1 is Windows-only, but PowerShell 5.1+ runs LF-terminated scripts
+# without complaint, so it is kept LF for consistency with the rest of the repo
+# and so a release asset is byte-identical to the committed file.
+*.ps1 text eol=lf
+
+LICENSE text eol=lf
