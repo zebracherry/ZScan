@@ -16,6 +16,14 @@
 # zscan.ps1 is Windows-only, but PowerShell 5.1+ runs LF-terminated scripts
 # without complaint, so it is kept LF for consistency with the rest of the repo
 # and so a release asset is byte-identical to the committed file.
+#
+# Keep zscan.ps1 pure ASCII. Windows PowerShell 5.1 decodes a .ps1 without a BOM
+# using the machine's ANSI codepage, not UTF-8, so a UTF-8 em dash (e2 80 94) or
+# box-drawing rule (e2 94 80) is read as mojibake whose 0x94 byte becomes U+201D
+# RIGHT DOUBLE QUOTATION MARK -- a character the PowerShell parser accepts as a
+# string delimiter. One such character inside a double-quoted string terminates
+# it early and cascades into dozens of bogus syntax errors on an otherwise valid
+# script. ASCII parses identically under every codepage, with or without a BOM.
 *.ps1 text eol=lf
 
 LICENSE text eol=lf

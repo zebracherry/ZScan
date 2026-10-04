@@ -1,20 +1,20 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    ZScan v2.1.0 — Air-gap Safe Network Scanner (PowerShell Edition)
+    ZScan v2.1.0 - Air-gap Safe Network Scanner (PowerShell Edition)
 
 .DESCRIPTION
-    ZScan.ps1 — Windows network scanner with embedded NSE-equivalent scripts.
+    ZScan.ps1 - Windows network scanner with embedded NSE-equivalent scripts.
     No dependencies. No internet. No installs. Runs on any Windows 10/11/Server
-    with PowerShell 5.1+ — which is every modern Windows system.
+    with PowerShell 5.1+ - which is every modern Windows system.
 
     WHAT'S NEW IN v2.1:
       HTTP: OPTIONS-based method detection (PUT/DELETE/TRACE/WebDAV etc.)
-      HTTP: http-webdav-scan — detects PROPFIND/MKCOL/LOCK/UNLOCK exposure
-      HTTP: http-open-proxy — CONNECT method detection
-      HTTP: http-trace — TRACE XST vulnerability check
+      HTTP: http-webdav-scan - detects PROPFIND/MKCOL/LOCK/UNLOCK exposure
+      HTTP: http-open-proxy - CONNECT method detection
+      HTTP: http-trace - TRACE XST vulnerability check
       HTTP: non-standard ports now get full HTTP script suite (33033, 45332 etc.)
-      SSL:  cert check now uses raw SslStream — works on ANY port (44330 etc.)
+      SSL:  cert check now uses raw SslStream - works on ANY port (44330 etc.)
       SSL:  protocol version check (TLSv1/SSLv3 flagged as weak)
       FTP:  directory listing now grouped into single result (cleaner output)
       Service: banner-based name upgrade (unknown ports now show http/ftp/ssh etc.)
@@ -33,7 +33,7 @@
     Version  : 2.1.0
     License  : MIT
     For authorised security testing only.
-    AIR-GAP SAFE: Uses only System.Net.Sockets + System.Net — built into .NET Framework
+    AIR-GAP SAFE: Uses only System.Net.Sockets + System.Net - built into .NET Framework
 #>
 
 [CmdletBinding()]
@@ -71,9 +71,9 @@ $ErrorActionPreference = "SilentlyContinue"
 
 $VERSION = "2.1.0"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # COLOUR HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Write-C { param([string]$Text,[string]$Fg="White",[switch]$NoNL)
     if ($NoColor) { $Fg="White" }
     if ($NoNL)    { Write-Host $Text -ForegroundColor $Fg -NoNewline }
@@ -85,9 +85,9 @@ function Write-Warn  { param([string]$t) Write-C $t Yellow }
 function Write-Err   { param([string]$t) Write-C $t Red    }
 function Write-Dim   { param([string]$t) if (!$Quiet) { Write-C $t DarkGray } }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # TIMING TEMPLATES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $Timing = @{
     0 = @{Workers=10;   Timeout=5000; Name="paranoid"}
     1 = @{Workers=50;   Timeout=3000; Name="sneaky"}
@@ -100,9 +100,9 @@ $Prof    = $Timing[$T]
 $TIMEOUT = $Prof.Timeout
 $WORKERS = $Prof.Workers
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PORT / SERVICE DATABASE
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $ServiceDB = @{
     20="ftp-data";  21="ftp";           22="ssh";       23="telnet"
     25="smtp";      53="dns";           69="tftp";      79="finger"
@@ -131,7 +131,7 @@ $Top100  = @(21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,
              1900,2000,2001,2049,2121,2717,3000,3128,3632,4899,5000,5009,
              5051,5060,5101,5190,5357,5432,5631,5666,5800,5985,6000,6001,
              6646,7070,8008,8009,8010,8031,8181,8192,49152,49153,49154,49155,49156)
-# High-value service ports above 1024 — the ones the embedded scripts target.
+# High-value service ports above 1024 - the ones the embedded scripts target.
 # The old "Select -First 1000" slice dropped every one of them, so the default
 # scan silently skipped RDP/MySQL/Mongo/Redis/VNC/alt-HTTP etc.
 $HighValuePorts = @(1080,1099,1194,1433,1521,1723,1883,2049,2082,2083,2086,2087,
@@ -145,22 +145,31 @@ $HighValuePorts = @(1080,1099,1194,1433,1521,1723,1883,2049,2082,2083,2086,2087,
     49153,49154,49155,49156,50000,50070,54321,61616)
 $Top1000 = ($Top100 + (1..1024) + $HighValuePorts) | Sort-Object -Unique
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # TARGET EXPANSION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Expand-Targets([string]$Str) {
     $IPs = [System.Collections.Generic.List[string]]::new()
     foreach ($part in ($Str -split ",")) {
         $part = $part.Trim()
         if ($part -match "^(\d+\.\d+\.\d+\.\d+)/(\d+)$") {
             $baseIP = $Matches[1]; $prefix = [int]$Matches[2]
+            if ($prefix -gt 32) { Write-Warn "[!] Invalid prefix /$prefix in '$part' - skipped"; continue }
             $ipBytes = [System.Net.IPAddress]::Parse($baseIP).GetAddressBytes()
             [Array]::Reverse($ipBytes)
             $ipInt   = [BitConverter]::ToUInt32($ipBytes, 0)
-            $mask    = if ($prefix -eq 0) { 0 } else { ([uint32]0xFFFFFFFF -shl (32-$prefix)) -band 0xFFFFFFFF }
-            $netInt  = $ipInt -band $mask
-            $hostMax = (-bnot $mask) -band 0xFFFFFFFF
-            for ($i = 1; $i -lt $hostMax; $i++) {
+            # PowerShell parses 0xFFFFFFFF as Int32 -1 (there is no 'u' suffix in 5.1),
+            # so [uint32]0xFFFFFFFF throws and "-band 0xFFFFFFFF" is a sign-extended
+            # no-op. The decimal literal widens to a positive Int64 instead, which is
+            # what the mask arithmetic below needs.
+            $allOnes = 4294967295
+            $mask    = if ($prefix -eq 0) { [uint32]0 } else { [uint32](($allOnes -shl (32-$prefix)) -band $allOnes) }
+            $netInt  = [uint32]($ipInt -band $mask)
+            $hostMax = $allOnes - $mask
+            # /31 and /32 carry no network/broadcast address to skip (RFC 3021), so
+            # enumerate the whole block; wider prefixes drop .0 and the broadcast.
+            if ($prefix -ge 31) { $lo = 0; $hi = $hostMax } else { $lo = 1; $hi = $hostMax - 1 }
+            for ($i = $lo; $i -le $hi; $i++) {
                 $b = [BitConverter]::GetBytes([uint32]($netInt + $i))
                 [Array]::Reverse($b)
                 $IPs.Add("$($b[0]).$($b[1]).$($b[2]).$($b[3])")
@@ -184,9 +193,9 @@ function Expand-Targets([string]$Str) {
     return $IPs
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PORT EXPANSION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Expand-Ports([string]$Str) {
     if ($Str -eq "-") { return 1..65535 }
     $ports = [System.Collections.Generic.List[int]]::new()
@@ -202,9 +211,9 @@ function Expand-Ports([string]$Str) {
     return ($ports | Sort-Object -Unique)
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HOST DISCOVERY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-HostUp([string]$IP, [int]$TMs=1000) {
     try {
         $ping  = [System.Net.NetworkInformation.Ping]::new()
@@ -223,9 +232,9 @@ function Test-HostUp([string]$IP, [int]$TMs=1000) {
     return $false
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PORT SCANNING
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-TCPPort([string]$IP, [int]$Port, [int]$TMs=1000) {
     try {
         $tcp = [System.Net.Sockets.TcpClient]::new()
@@ -268,9 +277,9 @@ function Test-UDPPort([string]$IP, [int]$Port, [int]$TMs=2000) {
     } catch { return "filtered" }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # BANNER GRABBING  (v2.1: HTTP probe on unknown ports + TLS fallback)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Service banners are raw bytes - MySQL's handshake and Modbus replies carry
 # NUL and other control characters, which leaked into the CSV and HTML reports
 # and made the terminal output register as a binary file. Render them as a
@@ -293,7 +302,7 @@ function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
     $SslPorts  = @(443,8443,993,995,465,636,44330)
     $HttpPorts = @(80,8080,8443,443,8888,9090,9200,5000,3000,7070,8000,
                    2375,6443,10250,33033,45332,45443)
-    # Non-HTTP raw-read ports — don't send HTTP probe to these
+    # Non-HTTP raw-read ports - don't send HTTP probe to these
     $RawPorts  = @(22,21,25,110,143,3306,5432,6379,27017,3389,5900)
 
     function Read-Stream($stream, $TMs2) {
@@ -313,7 +322,7 @@ function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
         return $sb.ToString()
     }
 
-    # ── Plain TCP attempt ─────────────────────────────────────────────────────
+    # -- Plain TCP attempt -----------------------------------------------------
     try {
         $tcp = [System.Net.Sockets.TcpClient]::new()
         $ar  = $tcp.BeginConnect($IP,$Port,$null,$null)
@@ -343,7 +352,7 @@ function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
         if ($result) { return $result }
     } catch {}
 
-    # ── TLS fallback for non-standard ports ───────────────────────────────────
+    # -- TLS fallback for non-standard ports -----------------------------------
     if ($Port -notin $SslPorts) {
         try {
             $tcp2 = [System.Net.Sockets.TcpClient]::new()
@@ -369,9 +378,9 @@ function Get-Banner([string]$IP, [int]$Port, [int]$TMs=3000) {
     return ""
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # VERSION FINGERPRINTING
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Get-Version([string]$Banner, [int]$Port) {
     $patterns = @(
         @{Re="SSH-[\d\.]+-OpenSSH[_\-](\S+)";        Tmpl="OpenSSH {1}"}
@@ -408,9 +417,9 @@ function Get-Version([string]$Banner, [int]$Port) {
     return $svc
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # OS DETECTION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Get-OSGuess([string]$IP) {
     try {
         $ping  = [System.Net.NetworkInformation.Ping]::new()
@@ -430,9 +439,9 @@ function Get-OSGuess([string]$IP) {
     return @{ OS="Unknown"; TTL=0; Method="none" }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HTTP HELPER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Invoke-ZHttp([string]$IP, [int]$Port, [string]$Path="/", [int]$TMs=5000) {
     $ssl = $Port -in @(443,8443)
     try {
@@ -473,9 +482,9 @@ function Invoke-ZHttp([string]$IP, [int]$Port, [string]$Path="/", [int]$TMs=5000
     } catch { return @{S=0;H=@{};B=""} }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FTP HELPERS  (v2 — full session)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# FTP HELPERS  (v2 - full session)
+# -----------------------------------------------------------------------------
 function Connect-FTP([string]$IP, [int]$Port, [int]$TMs=5000) {
     try {
         $tcp = [System.Net.Sockets.TcpClient]::new()
@@ -551,9 +560,9 @@ function Get-FTPDirListing([string]$IP, [int]$Port, [int]$TMs=5000) {
     finally { try { $tcp.Close() } catch {} }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SCRIPT RUNNER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Banner, [string[]]$Categories) {
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     $runAll  = $Categories -contains "all" -or $Categories.Count -eq 0
@@ -564,7 +573,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         $results.Add([PSCustomObject]@{Name=$Name;Output=(Clean-Text $Out);Vuln=$Vuln;CVE=$CVE})
     }
 
-    # Service detection — banner-based so non-standard ports are identified correctly
+    # Service detection - banner-based so non-standard ports are identified correctly
     $bannerIsHTTP  = $Banner -match "^HTTP/|Server:\s*\S|<html" 
     $bannerIsFTP   = ($Banner -match "^220[\s\-]") -and ($Banner -notmatch "SMTP|ESMTP")
     $bannerIsSSH   = $Banner -match "^SSH-"
@@ -598,7 +607,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
     $isModbus  = $Port -eq 502
     $isTelnet  = $Service -eq "telnet" -or $Port -eq 23
 
-    # ── Banner ────────────────────────────────────────────────────────────────
+    # -- Banner ----------------------------------------------------------------
     if ((Wants "default") -and $Banner) {
         $fl = ($Banner -split "`n")[0].Trim()
         if ($fl.Length -gt 2) {
@@ -606,7 +615,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         }
     }
 
-    # ── FTP Scripts (v2.1) ────────────────────────────────────────────────────
+    # -- FTP Scripts (v2.1) ----------------------------------------------------
     if ($isFTP -and (Wants "default")) {
         $ftpTcp, $ftpBanner = Connect-FTP $IP $Port 5000
         if ($ftpTcp) {
@@ -639,7 +648,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 if ($listLines) {
                     $listStr += "`n" + ($listLines | ForEach-Object { "    | $($_.TrimEnd())" }) -join "`n"
                 } else {
-                    $listStr += "`n    | (PASV failed — could not open data channel)"
+                    $listStr += "`n    | (PASV failed - could not open data channel)"
                 }
                 Add-R "ftp-anon" $listStr $true
 
@@ -664,11 +673,11 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         }
         # ftp-vsftpd-backdoor (CVE-2011-2523)
         if ((Wants "vuln") -and $Banner -match "vsftpd 2\.3\.4") {
-            Add-R "ftp-vsftpd-backdoor" "vsftpd 2.3.4 — check for backdoor on port 6200" $true "CVE-2011-2523"
+            Add-R "ftp-vsftpd-backdoor" "vsftpd 2.3.4 - check for backdoor on port 6200" $true "CVE-2011-2523"
         }
     }
 
-    # ── HTTP Scripts ──────────────────────────────────────────────────────────
+    # -- HTTP Scripts ----------------------------------------------------------
     if ($isHTTP -and (Wants "default")) {
         $r = Invoke-ZHttp $IP $Port
         if ($r.B -match "<title[^>]*>(.*?)</title>") {
@@ -712,7 +721,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                     }
                     # Open proxy
                     if ($methodsStr -match "CONNECT") {
-                        Add-R "http-open-proxy" "Potentially OPEN proxy — CONNECT method supported" $true
+                        Add-R "http-open-proxy" "Potentially OPEN proxy - CONNECT method supported" $true
                     }
                 }
             }
@@ -728,7 +737,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $trS.Write($trReq,0,$trReq.Length)
                 $trBuf = [byte[]]::new(1024); $n = $trS.Read($trBuf,0,$trBuf.Length); $trTcp.Close()
                 $trStr = [System.Text.Encoding]::ASCII.GetString($trBuf,0,$n)
-                if ($trStr -match "^HTTP/[\d\.]+ 200") { Add-R "http-trace" "HTTP TRACE method enabled — XST vulnerability" $true }
+                if ($trStr -match "^HTTP/[\d\.]+ 200") { Add-R "http-trace" "HTTP TRACE method enabled - XST vulnerability" $true }
             }
         } catch {}
 
@@ -795,15 +804,15 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         }
     }
 
-    # ── SSH Scripts ───────────────────────────────────────────────────────────
+    # -- SSH Scripts -----------------------------------------------------------
     if ($isSSH -and (Wants "default")) {
         Add-R "ssh-hostkey" (($Banner -split "`n")[0].Trim().Substring(0,[Math]::Min(80,($Banner -split "`n")[0].Trim().Length)))
         if ($Banner -match "SSH-1") {
-            Add-R "ssh-weak-version" "SSHv1 detected — deprecated and insecure" $true "CVE-2001-0553"
+            Add-R "ssh-weak-version" "SSHv1 detected - deprecated and insecure" $true "CVE-2001-0553"
         }
     }
 
-    # ── SMB Scripts ───────────────────────────────────────────────────────────
+    # -- SMB Scripts -----------------------------------------------------------
     if ($isSMB -and (Wants "default")) {
         try {
             $smb = [System.Net.Sockets.TcpClient]::new()
@@ -820,13 +829,13 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $buf = [byte[]]::new(4096); $n = $ss.Read($buf,0,$buf.Length)
                 $smb.Close()
                 if ($n -gt 36 -and $buf[4] -eq 0xFF -and $buf[5] -eq 0x53) {
-                    Add-R "smb-protocols" "SMBv1 supported — potentially vulnerable to EternalBlue" $true "CVE-2017-0144"
+                    Add-R "smb-protocols" "SMBv1 supported - potentially vulnerable to EternalBlue" $true "CVE-2017-0144"
                 } else { Add-R "smb-protocols" "SMBv1 not detected (SMBv2/3 likely)" }
             }
         } catch {}
     }
 
-    # ── SMTP Scripts ──────────────────────────────────────────────────────────
+    # -- SMTP Scripts ----------------------------------------------------------
     if ($isSMTP -and (Wants "default")) {
         try {
             $sm  = [System.Net.Sockets.TcpClient]::new()
@@ -853,7 +862,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                     $vf = [System.Text.Encoding]::ASCII.GetBytes("VRFY root`r`n")
                     $ss.Write($vf,0,$vf.Length); $n3 = $ss.Read($buf,0,$buf.Length)
                     $vR = [System.Text.Encoding]::ASCII.GetString($buf,0,$n3)
-                    if ($vR -match "^(250|252)") { Add-R "smtp-enum-users" "VRFY accepted — user enum possible" $true }
+                    if ($vR -match "^(250|252)") { Add-R "smtp-enum-users" "VRFY accepted - user enum possible" $true }
                     else                          { Add-R "smtp-enum-users" "VRFY rejected" }
                 }
                 $sm.Close()
@@ -861,7 +870,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── DNS Scripts ───────────────────────────────────────────────────────────
+    # -- DNS Scripts -----------------------------------------------------------
     if ($isDNS -and (Wants "default")) {
         try {
             $dnsQ = [byte[]](0xaa,0xbb,0x01,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,
@@ -872,13 +881,13 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
             $dr = $udp.Receive([ref]$ep); $udp.Close()
             if ($dr.Count -gt 2) {
                 $ra = ($dr[3] -band 0x80) -shr 7
-                if ($ra) { Add-R "dns-recursion" "Recursion available — open resolver possible" $true }
+                if ($ra) { Add-R "dns-recursion" "Recursion available - open resolver possible" $true }
                 else     { Add-R "dns-recursion" "Recursion not available" }
             }
         } catch {}
     }
 
-    # ── SNMP Scripts ──────────────────────────────────────────────────────────
+    # -- SNMP Scripts ----------------------------------------------------------
     if ($isSNMP -and (Wants "default")) {
         foreach ($comm in @("public","private","community","manager","admin")) {
             try {
@@ -893,13 +902,13 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $ep2  = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any,0)
                 $sr   = $snmp.Receive([ref]$ep2); $snmp.Close()
                 if ($sr -and $sr.Length -gt 0) {
-                    Add-R "snmp-info" "Community '$comm' accepted — SNMP accessible without auth" $true; break
+                    Add-R "snmp-info" "Community '$comm' accepted - SNMP accessible without auth" $true; break
                 }
             } catch {}
         }
     }
 
-    # ── LDAP Scripts ──────────────────────────────────────────────────────────
+    # -- LDAP Scripts ----------------------------------------------------------
     if ($isLDAP -and (Wants "default")) {
         try {
             $bind = [byte[]](0x30,0x0c,0x02,0x01,0x01,0x60,0x07,0x02,0x01,0x03,0x04,0x00,0x80,0x00)
@@ -916,7 +925,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── Redis Scripts ─────────────────────────────────────────────────────────
+    # -- Redis Scripts ---------------------------------------------------------
     if ($isRedis -and (Wants "default")) {
         try {
             $rt  = [System.Net.Sockets.TcpClient]::new()
@@ -935,13 +944,13 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $rInfo = $sb3.ToString()
                 if ($rInfo -match "redis_version") {
                     $ver = if ($rInfo -match "redis_version:(\S+)") { $Matches[1] } else { "?" }
-                    Add-R "redis-info" "Redis $ver — accessible without auth" $true
+                    Add-R "redis-info" "Redis $ver - accessible without auth" $true
                 }
             }
         } catch {}
     }
 
-    # ── Elasticsearch ─────────────────────────────────────────────────────────
+    # -- Elasticsearch ---------------------------------------------------------
     if ($isElastic -and (Wants "default")) {
         $re = Invoke-ZHttp $IP 9200 "/"
         if ($re.B -match "elasticsearch|cluster_name") {
@@ -950,7 +959,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         }
     }
 
-    # ── MySQL ─────────────────────────────────────────────────────────────────
+    # -- MySQL -----------------------------------------------------------------
     if ($isMySQL -and (Wants "default")) {
         try {
             $my = [System.Net.Sockets.TcpClient]::new()
@@ -968,7 +977,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── NTP Scripts ───────────────────────────────────────────────────────────
+    # -- NTP Scripts -----------------------------------------------------------
     if ($isNTP -and (Wants "default")) {
         try {
             $ntpR = [byte[]]::new(48); $ntpR[0]=0x1b
@@ -994,12 +1003,12 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $mu.Send($mlR,$mlR.Length,$IP,123) | Out-Null
                 $ep4 = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any,0)
                 $mr  = $mu.Receive([ref]$ep4); $mu.Close()
-                if ($mr.Count -gt 100) { Add-R "ntp-monlist" "monlist enabled — DDoS amplification ($($mr.Count)B)" $true "CVE-2013-5211" }
+                if ($mr.Count -gt 100) { Add-R "ntp-monlist" "monlist enabled - DDoS amplification ($($mr.Count)B)" $true "CVE-2013-5211" }
             } catch {}
         }
     }
 
-    # ── VNC Scripts ───────────────────────────────────────────────────────────
+    # -- VNC Scripts -----------------------------------------------------------
     if ($isVNC -and (Wants "default")) {
         try {
             $vt = [System.Net.Sockets.TcpClient]::new()
@@ -1010,12 +1019,12 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $vt.Close()
                 $vStr = [System.Text.Encoding]::ASCII.GetString($vb,0,$n).Trim()
                 Add-R "vnc-info" "Protocol: $($vStr.Substring(0,[Math]::Min(40,$vStr.Length)))"
-                if ($vStr -match "RFB 003\.00[37]") { Add-R "realvnc-auth-bypass" "Old VNC version — check for auth bypass" $true "CVE-2006-2369" }
+                if ($vStr -match "RFB 003\.00[37]") { Add-R "realvnc-auth-bypass" "Old VNC version - check for auth bypass" $true "CVE-2006-2369" }
             }
         } catch {}
     }
 
-    # ── IMAP Scripts ──────────────────────────────────────────────────────────
+    # -- IMAP Scripts ----------------------------------------------------------
     if ($isIMAP -and (Wants "default")) {
         try {
             $it = [System.Net.Sockets.TcpClient]::new()
@@ -1034,7 +1043,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── POP3 Scripts ──────────────────────────────────────────────────────────
+    # -- POP3 Scripts ----------------------------------------------------------
     if ($isPOP3 -and (Wants "default")) {
         try {
             $pt = [System.Net.Sockets.TcpClient]::new()
@@ -1052,7 +1061,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── RDP Scripts ───────────────────────────────────────────────────────────
+    # -- RDP Scripts -----------------------------------------------------------
     if ($isRDP -and (Wants "default")) {
         try {
             $rt2 = [System.Net.Sockets.TcpClient]::new()
@@ -1062,12 +1071,12 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $x224 = [byte[]](0x03,0x00,0x00,0x13,0x0E,0xE0,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x08,0x00,0x03,0x00,0x00,0x00)
                 $rs2.Write($x224,0,$x224.Length)
                 $rb = [byte[]]::new(1024); $n = $rs2.Read($rb,0,$rb.Length); $rt2.Close()
-                if ($n -gt 0 -and $rb[0] -eq 0x03) { Add-R "rdp-enum-encryption" "RDP responding — verify NLA/CredSSP is enforced" }
+                if ($n -gt 0 -and $rb[0] -eq 0x03) { Add-R "rdp-enum-encryption" "RDP responding - verify NLA/CredSSP is enforced" }
             }
         } catch {}
     }
 
-    # ── SSL Cert (v2.1 — raw SslStream, works on any port including 44330) ────
+    # -- SSL Cert (v2.1 - raw SslStream, works on any port including 44330) ----
     if ($isSSL -and (Wants "default")) {
         try {
             $sslTcp = [System.Net.Sockets.TcpClient]::new()
@@ -1102,7 +1111,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── Rsync Scripts ─────────────────────────────────────────────────────────
+    # -- Rsync Scripts ---------------------------------------------------------
     if ($isRsync -and (Wants "default")) {
         try {
             $ryt = [System.Net.Sockets.TcpClient]::new()
@@ -1128,16 +1137,16 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         } catch {}
     }
 
-    # ── Docker Scripts ────────────────────────────────────────────────────────
+    # -- Docker Scripts --------------------------------------------------------
     if ($isDocker -and (Wants "default")) {
         $dr = Invoke-ZHttp $IP $Port "/version"
         if ($dr.S -eq 200 -and $dr.B -match "ApiVersion") {
             $ver = if ($dr.B -match '"Version"\s*:\s*"([^"]+)"') {$Matches[1]} else {"?"}
-            Add-R "docker-version" "Docker $ver API — container escape risk!" $true
+            Add-R "docker-version" "Docker $ver API - container escape risk!" $true
         }
     }
 
-    # ── Kubernetes Scripts ────────────────────────────────────────────────────
+    # -- Kubernetes Scripts ----------------------------------------------------
     if ($isK8s -and (Wants "default")) {
         $kr = Invoke-ZHttp $IP $Port "/version"
         if ($kr.S -eq 200 -and $kr.B -match "gitVersion") {
@@ -1146,7 +1155,7 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
         }
     }
 
-    # ── Modbus Scripts ────────────────────────────────────────────────────────
+    # -- Modbus Scripts --------------------------------------------------------
     if ($isModbus -and (Wants "default")) {
         try {
             $mbt = [System.Net.Sockets.TcpClient]::new()
@@ -1156,12 +1165,12 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
                 $req = [byte[]](0x00,0x01,0x00,0x00,0x00,0x06,0xff,0x11,0x00,0x00,0x00,0x00)
                 $mbs.Write($req,0,$req.Length)
                 $mbb = [byte[]]::new(256); $n = $mbs.Read($mbb,0,$mbb.Length); $mbt.Close()
-                if ($n -gt 6) { Add-R "modbus-discover" "Modbus responding ($n bytes) — ICS/SCADA exposure!" $true }
+                if ($n -gt 6) { Add-R "modbus-discover" "Modbus responding ($n bytes) - ICS/SCADA exposure!" $true }
             }
         } catch {}
     }
 
-    # ── Telnet Scripts ────────────────────────────────────────────────────────
+    # -- Telnet Scripts --------------------------------------------------------
     if ($isTelnet -and (Wants "default")) {
         try {
             $tt = [System.Net.Sockets.TcpClient]::new()
@@ -1180,9 +1189,9 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
     return $results
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # MAIN
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $startTime = Get-Date
 $tStart    = [System.Diagnostics.Stopwatch]::StartNew()
 # @() so .Count is always valid: PowerShell unrolls a single-element
@@ -1202,16 +1211,16 @@ $ScriptCats = @(if ($Scripts -ne "") { $Scripts -split "," | ForEach-Object {$_.
 # Do not ask a possibly-scalar value for .Count here: with a single category
 # (-Scripts all) $ScriptCats used to be a String, scalar .Count threw under
 # StrictMode, SilentlyContinue hid it, the assignment aborted and $doScripts
-# stayed $null — so -Scripts was silently ignored and no script ever ran.
+# stayed $null - so -Scripts was silently ignored and no script ever ran.
 $doScripts  = $Scripts -ne ""
 $doBanner   = $ServiceDetection -or $doScripts
 
 # Print banner
-Write-C "`n$('─'*65)" White
-Write-C " ⚡ ZScan v$VERSION — Air-gap Safe Network Scanner" Yellow
+Write-C "`n$('-'*65)" White
+Write-C " ZScan v$VERSION - Air-gap Safe Network Scanner" Yellow
 Write-C " Target: $Target  Ports: $($PortList.Count)  Timing: T$T ($($Prof.Name))" White
 if ($doScripts) { Write-C " Scripts: $($Scripts)" Cyan }
-Write-C "$('─'*65)" White
+Write-C "$('-'*65)" White
 Write-C ""
 
 $allResults   = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -1222,7 +1231,7 @@ foreach ($IP in $IPs) {
     # Host discovery for multi-target
     if ($IPs.Count -gt 1 -or $ScanType -eq "Ping") {
         if (-not (Test-HostUp $IP $TIMEOUT)) {
-            Write-Dim "  [skip] $IP — host down"
+            Write-Dim "  [skip] $IP - host down"
             continue
         }
         Write-Ok "[+] Host up: $IP"
@@ -1315,7 +1324,7 @@ foreach ($IP in $IPs) {
                 $tag = if ($s.Vuln) { " [VULN]" } else { "" }
                 $cve = if ($s.CVE)  { " ($($s.CVE))" } else { "" }
                 $col = if ($s.Vuln) { "Red" } else { "DarkGray" }
-                # Handle multiline output — first line on same row as script name, rest indented
+                # Handle multiline output - first line on same row as script name, rest indented
                 $outLines = $s.Output -split "`n"
                 Write-C "    |_$($s.Name)$tag$cve" $col
                 Write-C "      $($outLines[0])" DarkGray
@@ -1341,18 +1350,18 @@ foreach ($IP in $IPs) {
     $allResults.Add($hostData)
     Write-C ""
     Write-Ok "  [*] $totalOpen open port(s) found" -NoNL
-    if ($globalVulns -gt 0) { Write-C "  ⚠ $globalVulns vuln(s) detected" Red -NoNL }
+    if ($globalVulns -gt 0) { Write-C "  ! $globalVulns vuln(s) detected" Red -NoNL }
     Write-C ""
 }
 
 $elapsed = "$([Math]::Round($tStart.Elapsed.TotalSeconds,2))s"
-Write-C "$('─'*65)" White
+Write-C "$('-'*65)" White
 Write-C " Done in $elapsed" White
 Write-C ""
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # OUTPUT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 if ($OutputJSON -ne "") {
     $out = @{
         version    = $VERSION
@@ -1387,14 +1396,14 @@ if ($OutputHTML -ne "") {
         foreach ($p in $h.Ports) {
             $scripts = ($p.Scripts | ForEach-Object {
                 $vClass = if ($_.Vuln) { " class='vuln'" } else { "" }
-                "<div$vClass><b>$($_.Name)</b>$(if($_.CVE){" <span class='cve'>$($_.CVE)</span>"}) — $($_.Output)</div>"
+                "<div$vClass><b>$($_.Name)</b>$(if($_.CVE){" <span class='cve'>$($_.CVE)</span>"}) - $($_.Output)</div>"
             }) -join ""
             "<tr><td>$($h.IP)</td><td>$($p.Port)</td><td>$($p.State)</td><td>$($p.Service)</td><td>$($p.Version)</td><td class='scripts'>$scripts</td></tr>"
         }
     }
     $html = @"
 <!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>ZScan $VERSION — $Target</title>
+<title>ZScan $VERSION - $Target</title>
 <style>
 body{background:#0d1117;color:#c9d1d9;font-family:monospace;margin:20px}
 h1{color:#58a6ff}table{border-collapse:collapse;width:100%}
@@ -1403,7 +1412,7 @@ td{padding:6px 8px;border-bottom:1px solid #21262d;vertical-align:top}
 tr:hover td{background:#161b22}.vuln{color:#f85149;font-weight:bold}
 .cve{color:#d29922;font-size:.85em}.scripts{font-size:.9em}
 </style></head><body>
-<h1>⚡ ZScan $VERSION</h1>
+<h1>ZScan $VERSION</h1>
 <p>Target: <b>$Target</b> | Scan: $($startTime.ToString('yyyy-MM-dd HH:mm:ss')) | Elapsed: $elapsed</p>
 <table>
 <tr><th>IP</th><th>Port</th><th>State</th><th>Service</th><th>Version</th><th>Scripts</th></tr>
