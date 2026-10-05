@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     ZScan v2.1.0 - Air-gap Safe Network Scanner (PowerShell Edition)
@@ -21,13 +22,72 @@
       Banner: TLS fallback probe for non-standard SSL ports
       Banner: HTTP probe sent on all non-raw-service ports
 
+.PARAMETER Target
+    What to scan: an IP, a CIDR block (192.168.1.0/24), a last-octet range
+    (192.168.1.1-20), a hostname, or a comma-separated list of those.
+    Positional, so the parameter name may be omitted. Optional when
+    -TargetFile is used; the two are merged and de-duplicated.
+
+.PARAMETER TargetFile
+    Read targets from a file, one per line (alias: -iL). Each line takes any
+    of the -Target forms; blank lines and anything after a "#" are ignored.
+    Use "-" to read the list from stdin.
+
+.PARAMETER ScanType
+    TCP (connect scan, default), UDP, or Ping for a ping sweep with no ports.
+
+.PARAMETER Ports
+    Ports to scan: "22,80", "1-1024", or "-" for all 65535.
+
+.PARAMETER TopPorts
+    Scan the N most common ports instead (default when neither is given: top 1000).
+
+.PARAMETER T
+    Timing template 0-5: 0 paranoid, 1 sneaky, 2 polite, 3 normal (default),
+    4 aggressive, 5 insane.
+
+.PARAMETER ServiceDetection
+    Grab banners and identify service versions.
+
+.PARAMETER OSDetect
+    TTL-based OS guess.
+
+.PARAMETER Scripts
+    Script categories to run: default, safe, vuln, auth, discovery or all
+    (comma-separated).
+
+.PARAMETER OutputJSON
+    Write the results to this file as JSON.
+
+.PARAMETER OutputHTML
+    Write the results to this file as a dark-themed HTML report.
+
+.PARAMETER OutputCSV
+    Write the results to this file as CSV.
+
+.PARAMETER ShowClosed
+    List closed/filtered ports as well as open ones.
+
+.PARAMETER Quiet
+    Suppress progress chatter.
+
+.PARAMETER NoColor
+    Plain monochrome output.
+
+.PARAMETER Help
+    Print the built-in usage text and exit (alias: -h). Running the script
+    with no arguments prints the same text.
+
 .EXAMPLE
     .\zscan.ps1 -Target 192.168.1.0/24 -ScanType Ping
     .\zscan.ps1 -Target 192.168.1.1 -Ports "22,80,443" -ServiceDetection
+    .\zscan.ps1 -iL hosts.txt -Ports "22,80,443" -ServiceDetection
+    Get-Content hosts.txt | .\zscan.ps1 -iL - -ScanType Ping
     .\zscan.ps1 -Target 10.0.0.1 -Ports "30021" -Scripts All -ServiceDetection
     .\zscan.ps1 -Target 10.0.0.1 -TopPorts 100 -Scripts All -OutputJSON scan.json
     .\zscan.ps1 -Target 10.0.0.0/24 -Ports "1-1024" -T 4 -OutputHTML report.html
     .\zscan.ps1 -Target 192.168.1.1 -ScanType UDP -Ports "53,161,500"
+    .\zscan.ps1 -h
 
 .NOTES
     Version  : 2.1.0
@@ -36,10 +96,20 @@
     AIR-GAP SAFE: Uses only System.Net.Sockets + System.Net - built into .NET Framework
 #>
 
+# NOTE: the blank lines around the help block above are required - Get-Help
+# only picks up comment-based script help when it is separated from both
+# #Requires and the script body by at least one blank line.
+
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true, Position=0)]
-    [string]$Target,
+    # Not mandatory: targets may instead come from -TargetFile, and a bare
+    # invocation should print the usage text rather than prompt for a value.
+    [Parameter(Position=0)]
+    [string]$Target = "",
+
+    # Read targets from a file, one per line ("-" reads stdin). -iL matches nmap.
+    [Alias("iL")]
+    [string]$TargetFile = "",
 
     [ValidateSet("TCP","UDP","Ping")]
     [string]$ScanType = "TCP",
@@ -63,7 +133,10 @@ param(
 
     [switch]$ShowClosed,
     [switch]$Quiet,
-    [switch]$NoColor
+    [switch]$NoColor,
+
+    [Alias("h")]
+    [switch]$Help
 )
 
 Set-StrictMode -Version Latest
@@ -84,6 +157,82 @@ function Write-Ok    { param([string]$t) Write-C $t Green  }
 function Write-Warn  { param([string]$t) Write-C $t Yellow }
 function Write-Err   { param([string]$t) Write-C $t Red    }
 function Write-Dim   { param([string]$t) if (!$Quiet) { Write-C $t DarkGray } }
+
+# -----------------------------------------------------------------------------
+# HELP
+# -----------------------------------------------------------------------------
+function Show-Usage {
+    Write-Host @"
+ZScan v$VERSION - Air-gap Safe Network Scanner (PowerShell Edition)
+
+USAGE
+  .\zscan.ps1 [-Target] <spec> [options]
+  .\zscan.ps1 -TargetFile <file> [options]
+
+TARGET SPECIFICATION
+  -Target <spec>         IP, CIDR, range (192.168.1.1-20), hostname, or a
+                         comma-separated list of those. Positional, so the
+                         name may be omitted.
+  -TargetFile <file>     Read targets from <file>, one per line. Alias: -iL
+                         Use "-" to read the list from stdin.
+
+  Target forms:
+    192.168.1.1                 single IP
+    192.168.1.0/24              CIDR block
+    192.168.1.1-20              last-octet range
+    host.example.lan            hostname (resolved with the local resolver)
+    "192.168.1.1,10.0.0.0/30"   comma-separated list of any of the above
+
+  A target file holds one target per line (any of the forms above). Blank
+  lines and anything after a "#" are ignored:
+
+    10.0.0.1          # gateway
+    10.0.0.16/28
+    192.168.1.1-20
+
+SCAN TYPE
+  -ScanType TCP          TCP connect scan (default)
+  -ScanType UDP          UDP scan
+  -ScanType Ping         Ping sweep only, no port scan
+
+PORT SELECTION
+  -Ports <spec>          Ports: "22,80" / "1-1024" / "-" for all 65535
+  -TopPorts <n>          Scan the n most common ports (default: top 1000)
+
+DETECTION
+  -ServiceDetection      Grab banners and identify service versions
+  -OSDetect              TTL-based OS guess
+  -Scripts <cats>        default | safe | vuln | auth | discovery | all
+                         (comma-separated, e.g. -Scripts "vuln,discovery")
+
+TIMING
+  -T <0-5>               0 paranoid, 1 sneaky, 2 polite, 3 normal (default),
+                         4 aggressive, 5 insane
+
+OUTPUT
+  -OutputJSON <file>     Write JSON results
+  -OutputHTML <file>     Write an HTML report
+  -OutputCSV <file>      Write CSV results
+  -ShowClosed            List closed/filtered ports too
+  -Quiet                 Suppress progress chatter
+  -NoColor               Plain monochrome output
+
+MISC
+  -Help                  Show this help and exit. Alias: -h
+
+EXAMPLES
+  .\zscan.ps1 192.168.1.1
+  .\zscan.ps1 -Target 192.168.1.0/24 -ScanType Ping -T 4
+  .\zscan.ps1 -iL hosts.txt -Ports "22,80,443" -ServiceDetection
+  .\zscan.ps1 -iL hosts.txt -Scripts all -ServiceDetection -OutputHTML report.html
+  .\zscan.ps1 -Target 10.0.0.1 -TopPorts 100 -Scripts All -OutputJSON scan.json
+  Get-Content hosts.txt | .\zscan.ps1 -iL - -ScanType Ping
+
+Run with no arguments to print this help. For authorised testing only.
+"@
+}
+
+if ($Help) { Show-Usage; exit 0 }
 
 # -----------------------------------------------------------------------------
 # TIMING TEMPLATES
@@ -191,6 +340,39 @@ function Expand-Targets([string]$Str) {
         } catch { Write-Warn "[!] Could not resolve: $part" }
     }
     return $IPs
+}
+
+# Reads target specs from a file, or from stdin when $Path is "-". One target
+# per line is the normal case; blank lines and everything after a "#" are
+# ignored, and a single line may still hold several whitespace- or
+# comma-separated specs.
+function Read-TargetFile([string]$Path) {
+    $specs = [System.Collections.Generic.List[string]]::new()
+    if ($Path -eq "-") {
+        $raw = [Console]::In.ReadToEnd()
+    } else {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            Write-Err "[!] Cannot read target list '$Path' - no such file"
+            exit 1
+        }
+        try {
+            $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        } catch {
+            Write-Err "[!] Cannot read target list '$Path' - $($_.Exception.Message)"
+            exit 1
+        }
+        # -Raw on an empty file yields $null; that is an empty list, not an
+        # error, so let the "no scannable target" check report it.
+        if ($null -eq $raw) { $raw = "" }
+    }
+    foreach ($line in ($raw -split "`r?`n")) {
+        $line = (($line -split "#", 2)[0]).Trim()
+        if ($line -eq "") { continue }
+        foreach ($tok in ($line -split "[\s,]+")) {
+            if ($tok -ne "") { $specs.Add($tok) }
+        }
+    }
+    return $specs
 }
 
 # -----------------------------------------------------------------------------
@@ -1195,11 +1377,54 @@ function Invoke-Scripts([string]$IP, [int]$Port, [string]$Service, [string]$Bann
 # -----------------------------------------------------------------------------
 # MAIN
 # -----------------------------------------------------------------------------
+# With neither -Target nor -TargetFile there is nothing to scan, and the old
+# mandatory -Target just prompted for a value, so nobody ever saw what the
+# tool could do. Print the usage text instead.
+if ($Target -eq "" -and $TargetFile -eq "") {
+    if ($PSBoundParameters.Count -eq 0) { Show-Usage; exit 0 }
+    Write-Err "[!] No target given: pass -Target, or -TargetFile/-iL <file> (-Help lists the forms)"
+    exit 1
+}
+
 $startTime = Get-Date
 $tStart    = [System.Diagnostics.Stopwatch]::StartNew()
-# @() so .Count is always valid: PowerShell unrolls a single-element
-# return value to a scalar, and under StrictMode scalar .Count throws.
-$IPs       = @(Expand-Targets $Target)
+
+# Collect the specs from -Target and/or -TargetFile, then expand them into a
+# de-duplicated IP list so an overlapping file and CIDR do not scan a host twice.
+$TargetSpecs = [System.Collections.Generic.List[string]]::new()
+if ($Target -ne "") {
+    foreach ($tok in ($Target -split "[\s,]+")) { if ($tok -ne "") { $TargetSpecs.Add($tok) } }
+}
+if ($TargetFile -ne "") {
+    foreach ($tok in @(Read-TargetFile $TargetFile)) { $TargetSpecs.Add($tok) }
+}
+
+$seenIP = [System.Collections.Generic.HashSet[string]]::new()
+$IPList = [System.Collections.Generic.List[string]]::new()
+foreach ($spec in $TargetSpecs) {
+    # @() so .Count is always valid: PowerShell unrolls a single-element
+    # return value to a scalar, and under StrictMode scalar .Count throws.
+    foreach ($ip in @(Expand-Targets $spec)) {
+        if ($seenIP.Add($ip)) { $IPList.Add($ip) }
+    }
+}
+$IPs = @($IPList)
+
+# A file or stdin list can hold thousands of entries, so the banner and the
+# output files name the source instead of echoing every spec.
+if ($TargetFile -ne "") {
+    $src = if ($TargetFile -eq "-") { "stdin" } else { $TargetFile }
+    if ($Target -ne "") { $src = "$Target + $src" }
+    $plural = if ($IPs.Count -eq 1) { "host" } else { "hosts" }
+    $TargetLabel = "$src ($($IPs.Count) $plural)"
+} else {
+    $TargetLabel = $Target
+}
+
+if ($IPs.Count -eq 0) {
+    Write-Err "[!] No scannable target resolved from: $TargetLabel"
+    exit 1
+}
 
 # Resolve port list
 if ($Ports -ne "") {
@@ -1221,7 +1446,7 @@ $doBanner   = $ServiceDetection -or $doScripts
 # Print banner
 Write-C "`n$('-'*65)" White
 Write-C " ZScan v$VERSION - Air-gap Safe Network Scanner" Yellow
-Write-C " Target: $Target  Ports: $($PortList.Count)  Timing: T$T ($($Prof.Name))" White
+Write-C " Target: $TargetLabel  Ports: $($PortList.Count)  Timing: T$T ($($Prof.Name))" White
 if ($doScripts) { Write-C " Scripts: $($Scripts)" Cyan }
 Write-C "$('-'*65)" White
 Write-C ""
@@ -1383,7 +1608,7 @@ if ($OutputJSON -ne "") {
         version    = $VERSION
         start_time = $startTime.ToString("yyyy-MM-dd HH:mm:ss")
         elapsed    = $elapsed
-        target     = $Target
+        target     = $TargetLabel
         hosts      = $allResults
     }
     $out | ConvertTo-Json -Depth 10 | Set-Content -Path $OutputJSON -Encoding UTF8
@@ -1437,7 +1662,7 @@ if ($OutputHTML -ne "") {
     }
     $html = @"
 <!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>ZScan $VERSION - $Target</title>
+<title>ZScan $VERSION - $TargetLabel</title>
 <style>
 body{background:#0d1117;color:#c9d1d9;font-family:monospace;margin:20px}
 h1{color:#58a6ff}table{border-collapse:collapse;width:100%}
@@ -1447,7 +1672,7 @@ tr:hover td{background:#161b22}.vuln{color:#f85149;font-weight:bold}
 .cve{color:#d29922;font-size:.85em}.scripts{font-size:.9em}
 </style></head><body>
 <h1>ZScan $VERSION</h1>
-<p>Target: <b>$Target</b> | Scan: $($startTime.ToString('yyyy-MM-dd HH:mm:ss')) | Elapsed: $elapsed</p>
+<p>Target: <b>$TargetLabel</b> | Scan: $($startTime.ToString('yyyy-MM-dd HH:mm:ss')) | Elapsed: $elapsed</p>
 <table>
 <tr><th>IP</th><th>Port</th><th>State</th><th>Service</th><th>Version</th><th>Scripts</th></tr>
 $($htmlRows -join "`n")

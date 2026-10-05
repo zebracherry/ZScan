@@ -1740,6 +1740,60 @@ def parse_targets(target_str: str) -> List[str]:
             print(f"{Y}[!] Could not resolve: {part}{RST}")
     return targets
 
+def read_target_file(path: str) -> List[str]:
+    """Read target specs from a file, or from stdin when path is "-".
+
+    One target per line is the normal case. Blank lines and everything after a
+    "#" are ignored, and a single line may still hold several specs separated
+    by whitespace or commas.
+    """
+    try:
+        if path == "-":
+            raw = sys.stdin.read()
+        else:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                raw = fh.read()
+    except OSError as e:
+        print(f"{R}[!] Cannot read target list {path!r}: {e}{RST}")
+        sys.exit(1)
+
+    specs: List[str] = []
+    for line in raw.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        specs.extend(tok for tok in re.split(r"[\s,]+", line) if tok)
+    return specs
+
+def resolve_targets(args) -> Tuple[List[str], str]:
+    """Expand the positional target and/or -iL file into a de-duplicated IP list.
+
+    Returns the IPs plus a short label describing where they came from, so the
+    banner and the output files do not have to print a 1000-entry host list.
+    """
+    specs: List[str] = []
+    if args.target:
+        specs.extend(tok for tok in re.split(r"[\s,]+", args.target) if tok)
+    if args.iL:
+        specs.extend(read_target_file(args.iL))
+
+    targets: List[str] = []
+    seen = set()
+    for spec in specs:
+        for ip in parse_targets(spec):
+            if ip not in seen:
+                seen.add(ip)
+                targets.append(ip)
+
+    if args.iL:
+        src = "stdin" if args.iL == "-" else args.iL
+        if args.target:
+            src = f"{args.target} + {src}"
+        label = f"{src} ({len(targets)} host{'' if len(targets) == 1 else 's'})"
+    else:
+        label = args.target or ""
+    return targets, label
+
 def parse_ports(port_str: str) -> List[int]:
     if port_str.strip() == "-":
         return list(range(1, 65536))
@@ -1915,11 +1969,12 @@ def run_scan(args) -> Dict:
         ports = TOP_1000
 
     # Targets
-    targets = parse_targets(args.target)
+    targets, target_label = resolve_targets(args)
     if not targets:
         # Previously the scan just did nothing and still exited 0, so a wrapper
         # script or CI job could not tell a typo'd target from a clean scan.
-        print(f"{R}[!] No scannable target resolved from: {args.target}{RST}")
+        src = target_label or args.iL or args.target
+        print(f"{R}[!] No scannable target resolved from: {src}{RST}")
         sys.exit(1)
 
     # Banner / version
@@ -1929,14 +1984,14 @@ def run_scan(args) -> Dict:
     # Print banner
     print(f"\n{B}{'─'*65}{RST}")
     print(f" {Y}⚡ ZScan v{VERSION}{RST} — Air-gap Safe Network Scanner")
-    print(f" Target: {B}{args.target}{RST}  Ports: {len(ports)}  "
+    print(f" Target: {B}{target_label}{RST}  Ports: {len(ports)}  "
           f"Timing: {B}T{args.T} ({timing['name']}){RST}")
     if do_scripts:
         print(f" Scripts: {B}{args.script or 'default'}{RST}")
     print(f"{B}{'─'*65}{RST}\n")
 
     results_data: Dict = {
-        "start_time": start_dt, "target": args.target,
+        "start_time": start_dt, "target": target_label,
         "version": VERSION, "hosts": []
     }
 
@@ -2008,15 +2063,40 @@ def main():
         prog="zscan",
         description=f"ZScan v{VERSION} — Air-gap Safe Network Scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Examples:
+        epilog="""Target forms:
+  192.168.1.1                 single IP
+  192.168.1.0/24              CIDR block
+  192.168.1.1-20              last-octet range
+  host.example.lan            hostname (resolved with the local resolver)
+  192.168.1.1,10.0.0.0/30     comma-separated list of any of the above
+  -iL hosts.txt               read targets from a file, one per line
+  -iL -                       read targets from stdin
+
+Target list files hold one target per line (any of the forms above). Blank
+lines and anything after a '#' are ignored:
+
+  10.0.0.1          # gateway
+  10.0.0.16/28
+  192.168.1.1-20
+
+Examples:
   python3 zscan.py 192.168.1.1
   python3 zscan.py 192.168.1.0/24 -sn -T4
   python3 zscan.py 192.168.1.1 -sT -sV --script default
+  python3 zscan.py -iL hosts.txt -p 22,80,443 -sV
   python3 zscan.py 10.0.0.1 -p 30021 --script all -sV
   sudo python3 zscan.py 10.0.0.1 -sS -p 1-1024 -O --script all
-  sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json"""
+  sudo python3 zscan.py -iL hosts.txt -sS -p - --script all -oJ results.json
+  cat hosts.txt | python3 zscan.py -iL - -sn
+
+Run with no arguments to print this help. For authorised testing only."""
     )
-    parser.add_argument("target", help="IP, CIDR, range (192.168.1.1-20), hostname")
+    tsg = parser.add_argument_group("Target Specification")
+    tsg.add_argument("target", nargs="?",
+                     help="IP, CIDR, range (192.168.1.1-20), hostname, or a "
+                          "comma-separated list of those")
+    tsg.add_argument("-iL", dest="iL", metavar="FILE",
+                     help="Read targets from FILE, one per line ('-' = stdin)")
     sg = parser.add_argument_group("Scan Types")
     sg.add_argument("-sS", action="store_true", help="TCP SYN scan (root)")
     sg.add_argument("-sT", action="store_true", help="TCP Connect scan (default)")
@@ -2026,20 +2106,35 @@ def main():
     sg.add_argument("-sX", action="store_true", help="TCP XMAS scan (root)")
     sg.add_argument("-sn", action="store_true", help="Ping sweep only")
     pg = parser.add_argument_group("Port Selection")
-    pg.add_argument("-p",          default="", help="Ports: 22,80 / 1-1024 / -")
-    pg.add_argument("--top-ports", type=int, default=0, metavar="N")
+    pg.add_argument("-p",          default="", help="Ports: 22,80 / 1-1024 / - (all 65535)")
+    pg.add_argument("--top-ports", type=int, default=0, metavar="N",
+                    help="Scan the N most common ports (default: top 1000)")
     dg = parser.add_argument_group("Detection")
     dg.add_argument("-sV", action="store_true", help="Version detection")
     dg.add_argument("-O",  action="store_true", help="OS detection")
     dg.add_argument("--script", metavar="CATS",
                     help="Scripts: default,safe,vuln,auth,discovery,all (comma-sep)")
     tg = parser.add_argument_group("Timing")
-    tg.add_argument("-T", type=int, default=3, choices=range(6), metavar="[0-5]")
+    tg.add_argument("-T", type=int, default=3, choices=range(6), metavar="[0-5]",
+                    help="Timing template: 0 paranoid .. 5 insane (default: 3)")
     og = parser.add_argument_group("Output")
     og.add_argument("-oJ", metavar="FILE", help="JSON output")
     og.add_argument("-oX", metavar="FILE", help="XML output")
     og.add_argument("-oG", metavar="FILE", help="Grepable output")
+    mg = parser.add_argument_group("Misc")
+    mg.add_argument("-V", "--version", action="version",
+                    version=f"ZScan {VERSION}", help="Show version and exit")
+
+    # A bare "zscan" used to abort with a one-line usage error, which never
+    # told anyone what the tool can do. Print the full help instead.
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
     args = parser.parse_args()
+    if not args.target and not args.iL:
+        parser.error("no target given: pass a target, or -iL FILE "
+                     "(see -h for the target forms)")
     run_scan(args)
 
 if __name__ == "__main__":

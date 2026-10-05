@@ -6,6 +6,14 @@
 
 ## Changelog
 
+### Unreleased
+| Area | Improvement |
+|---|---|
+| **Targets** | `-iL FILE` (Python) / `-TargetFile`, alias `-iL` (PowerShell) — scan a list of targets read one per line from a file, or from stdin with `-iL -` |
+| **Targets** | Target specs from the command line and the list file are merged and de-duplicated, so an overlapping CIDR and file never scan a host twice |
+| **Help** | `-h` / `--help` (Python) and `-h` / `-Help` (PowerShell) print full usage: every flag, the target forms, and examples. Running with no arguments prints the same help instead of a bare usage error |
+| **Help** | `-V` / `--version` (Python) prints the version and exits |
+
 ### v2.1.0
 | Area | Improvement |
 |---|---|
@@ -80,6 +88,15 @@ sudo python3 zscan.py 10.0.0.1 -sS -p 1-1024 -O --script all
 
 # All 65535 ports + JSON output
 sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json
+
+# Targets from a file, one per line
+python3 zscan.py -iL hosts.txt -p 22,80,443 -sV
+
+# Targets piped in on stdin
+cat hosts.txt | python3 zscan.py -iL - -sn
+
+# Full help: every flag, the target forms, examples
+python3 zscan.py -h
 ```
 
 ### PowerShell — Windows
@@ -99,7 +116,46 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json
 
 # All ports + JSON + CSV
 .\zscan.ps1 -Target 10.0.0.0/24 -T 4 -Scripts vuln -OutputJSON scan.json -OutputCSV scan.csv
+
+# Targets from a file, one per line
+.\zscan.ps1 -iL hosts.txt -Ports "22,80,443" -ServiceDetection
+
+# Targets piped in on stdin
+Get-Content hosts.txt | .\zscan.ps1 -iL - -ScanType Ping
+
+# Full help: every flag, the target forms, examples
+.\zscan.ps1 -h
 ```
+
+---
+
+## Target Specification
+
+| Form | Example |
+|---|---|
+| Single IP | `192.168.1.1` |
+| CIDR block | `192.168.1.0/24` |
+| Last-octet range | `192.168.1.1-20` |
+| Hostname | `host.example.lan` (resolved with the local resolver) |
+| Comma-separated list | `192.168.1.1,10.0.0.0/30,host.example.lan` |
+| List from a file | `-iL hosts.txt` (Python) · `-iL hosts.txt` / `-TargetFile hosts.txt` (PowerShell) |
+| List from stdin | `-iL -` |
+
+A list file holds **one target per line** — any of the forms above. Blank lines
+and everything after a `#` are ignored, and a line may still hold several
+specs separated by spaces or commas:
+
+```
+# perimeter
+10.0.0.1          # gateway
+10.0.0.16/28
+192.168.1.1-20
+host.example.lan
+```
+
+A command-line target and `-iL` can be combined; the two lists are merged and
+de-duplicated, and the banner and output files name the list source instead of
+echoing every host.
 
 ---
 
@@ -256,6 +312,24 @@ sudo python3 zscan.py 10.0.0.1 -sS -p - --script all -oJ results.json
 -OutputJSON r.json
 -OutputHTML r.html   Dark themed dashboard
 -OutputCSV  r.csv
+```
+
+---
+
+## Help
+
+```bash
+python3 zscan.py -h          # full usage: flags, target forms, examples
+python3 zscan.py --help
+python3 zscan.py             # no arguments prints the same help
+python3 zscan.py -V          # version
+```
+
+```powershell
+.\zscan.ps1 -h              # full usage: flags, target forms, examples
+.\zscan.ps1 -Help
+.\zscan.ps1                 # no arguments prints the same help
+Get-Help .\zscan.ps1 -Full  # comment-based help, PowerShell style
 ```
 
 ---
