@@ -214,22 +214,25 @@ function Expand-Ports([string]$Str) {
 # -----------------------------------------------------------------------------
 # HOST DISCOVERY
 # -----------------------------------------------------------------------------
+# Returns a short string naming how the host answered ("icmp", "tcp/445"), or
+# $null if it did not answer at all. A non-empty string is truthy and $null is
+# falsy, so callers can still treat the result as a plain boolean test.
 function Test-HostUp([string]$IP, [int]$TMs=1000) {
     try {
         $ping  = [System.Net.NetworkInformation.Ping]::new()
         $reply = $ping.Send($IP, $TMs)
-        if ($reply.Status -eq "Success") { return $true }
+        if ($reply.Status -eq "Success") { return "icmp" }
     } catch {}
     foreach ($port in @(80,443,22,445,3389)) {
         try {
             $tcp = [System.Net.Sockets.TcpClient]::new()
             $ar  = $tcp.BeginConnect($IP, $port, $null, $null)
             $ok  = $ar.AsyncWaitHandle.WaitOne($TMs, $false)
-            if ($ok -and $tcp.Connected) { $tcp.Close(); return $true }
+            if ($ok -and $tcp.Connected) { $tcp.Close(); return "tcp/$port" }
             $tcp.Close()
         } catch {}
     }
-    return $false
+    return $null
 }
 
 # -----------------------------------------------------------------------------
@@ -1229,20 +1232,32 @@ $totalOpen    = 0
 
 foreach ($IP in $IPs) {
     # Host discovery for multi-target
+    $upVia = ""
     if ($IPs.Count -gt 1 -or $ScanType -eq "Ping") {
-        if (-not (Test-HostUp $IP $TIMEOUT)) {
+        $upVia = Test-HostUp $IP $TIMEOUT
+        if (-not $upVia) {
             Write-Dim "  [skip] $IP - host down"
             continue
         }
-        Write-Ok "[+] Host up: $IP"
-        if ($ScanType -eq "Ping") { continue }
+        Write-Ok "[+] Host up: $IP ($upVia)"
     }
 
     $hostData = [PSCustomObject]@{
         IP      = $IP
         OS      = ""
         TTL     = 0
+        Status  = "up"
+        Method  = $upVia
         Ports   = [System.Collections.Generic.List[PSCustomObject]]::new()
+    }
+
+    # A ping sweep has no ports to scan, but the live host still has to be
+    # recorded. This used to "continue" before $hostData was ever built, so
+    # $allResults stayed empty and every -Output* file came back with no hosts
+    # even though the console had just listed them as up.
+    if ($ScanType -eq "Ping") {
+        $allResults.Add($hostData)
+        continue
     }
 
     if ($OSDetect) {
@@ -1356,6 +1371,7 @@ foreach ($IP in $IPs) {
 
 $elapsed = "$([Math]::Round($tStart.Elapsed.TotalSeconds,2))s"
 Write-C "$('-'*65)" White
+if ($ScanType -eq "Ping") { Write-Ok " $($allResults.Count) host(s) up of $($IPs.Count) scanned" }
 Write-C " Done in $elapsed" White
 Write-C ""
 
@@ -1376,14 +1392,28 @@ if ($OutputJSON -ne "") {
 
 if ($OutputCSV -ne "") {
     $rows = foreach ($h in $allResults) {
-        foreach ($p in $h.Ports) {
+        if ($h.Ports.Count -eq 0) {
+            # Ping sweep, or a live host with nothing open: record the host anyway.
             [PSCustomObject]@{
                 IP      = $h.IP
-                Port    = $p.Port
-                State   = $p.State
-                Service = $p.Service
-                Version = $p.Version
-                Vulns   = ($p.Scripts | Where-Object {$_.Vuln} | ForEach-Object {"$($_.Name)($($_.CVE))"}) -join "; "
+                Port    = ""
+                State   = $h.Status
+                Service = ""
+                Version = ""
+                Detect  = $h.Method
+                Vulns   = ""
+            }
+        } else {
+            foreach ($p in $h.Ports) {
+                [PSCustomObject]@{
+                    IP      = $h.IP
+                    Port    = $p.Port
+                    State   = $p.State
+                    Service = $p.Service
+                    Version = $p.Version
+                    Detect  = $h.Method
+                    Vulns   = ($p.Scripts | Where-Object {$_.Vuln} | ForEach-Object {"$($_.Name)($($_.CVE))"}) -join "; "
+                }
             }
         }
     }
@@ -1393,6 +1423,10 @@ if ($OutputCSV -ne "") {
 
 if ($OutputHTML -ne "") {
     $htmlRows = foreach ($h in $allResults) {
+        if ($h.Ports.Count -eq 0) {
+            "<tr><td>$($h.IP)</td><td>-</td><td>$($h.Status)</td><td>-</td><td>-</td><td class='scripts'>host alive (detected via $($h.Method))</td></tr>"
+            continue
+        }
         foreach ($p in $h.Ports) {
             $scripts = ($p.Scripts | ForEach-Object {
                 $vClass = if ($_.Vuln) { " class='vuln'" } else { "" }
