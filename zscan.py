@@ -7,9 +7,16 @@
 ███████╗███████║╚██████╗██║  ██║██║ ╚████║
 ╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝
 
-ZScan — Air-gap Safe Network Scanner  v2.1.0
+ZScan — Air-gap Safe Network Scanner  v2.2.0
 Platform : Linux / Windows (Python 3.6+)
 License  : MIT
+
+WHAT'S NEW IN v2.2:
+  • -iL FILE: scan a list of targets read one per line from a file ('-' = stdin)
+  • A positional target and -iL can be combined; specs are de-duplicated
+  • Full help on -h/--help or a bare run: flags, target forms, list format, examples
+  • -V/--version prints the version
+  • Fix: a ping sweep now records live hosts, so -oJ/-oX/-oG are not empty
 
 WHAT'S NEW IN v2.1:
   • HTTP: http-methods (risky OPTIONS), http-webdav-scan, http-open-proxy, http-trace (XST)
@@ -46,8 +53,10 @@ SCAN TYPES:
   --script  Run embedded scripts (default/safe/vuln/auth/discovery/all)
   -p   Port range: 22,80 / 1-1024 / - (all)
   --top-ports N
+  -iL  Read targets from a file, one per line ('-' = stdin)
   -T0..-T5  Timing templates
   -oJ/-oX/-oG  Output formats
+  -h   Full help: every flag, the target forms, examples
 
 AIR-GAP SAFE: stdlib only — zero external deps
 """
@@ -88,7 +97,7 @@ def _sanitize(value) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-VERSION    = "2.1.0"
+VERSION    = "2.2.0"
 TOOL       = "ZScan"
 IS_WINDOWS = platform.system() == "Windows"
 IS_ROOT    = (os.geteuid() == 0) if not IS_WINDOWS else False

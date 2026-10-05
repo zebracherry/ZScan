@@ -1,4 +1,4 @@
-# ⚡ ZScan — Air-gap Safe Network Scanner v2.1.0
+# ⚡ ZScan — Air-gap Safe Network Scanner v2.2.0
 
 > **Full NSE-suite network scanner — 58 embedded scripts, zero installs, works completely offline**
 
@@ -6,13 +6,20 @@
 
 ## Changelog
 
-### Unreleased
+### v2.2.0
 | Area | Improvement |
 |---|---|
 | **Targets** | `-iL FILE` (Python) / `-TargetFile`, alias `-iL` (PowerShell) — scan a list of targets read one per line from a file, or from stdin with `-iL -` |
 | **Targets** | Target specs from the command line and the list file are merged and de-duplicated, so an overlapping CIDR and file never scan a host twice |
 | **Help** | `-h` / `--help` (Python) and `-h` / `-Help` (PowerShell) print full usage: every flag, the target forms, and examples. Running with no arguments prints the same help instead of a bare usage error |
+| **Help** | `Get-Help .\zscan.ps1 -Full` now works — the comment-based help block was never reachable, because Get-Help needs a blank line between it and `#Requires`/the script body |
 | **Help** | `-V` / `--version` (Python) prints the version and exits |
+| **Fix** | PowerShell: a ping sweep listed live hosts on the console but wrote `"hosts": []` to every `-Output*` file — the sweep's early exit skipped recording them |
+| **Fix** | PowerShell: CSV and HTML reports skipped any live host with no open ports |
+| **Fix** | PowerShell: `-ScanType Ping` now reports *how* a host answered (`icmp`, `tcp/445`) instead of a bare `up` |
+| **Fix** | PowerShell: the script would not parse at all under Windows PowerShell 5.1 — a UTF-8 em dash read through the ANSI codepage closed a string early and cascaded into 50 bogus syntax errors. The file is now pure ASCII, and `.gitattributes` records why it must stay that way |
+| **Fix** | PowerShell: every CIDR target silently expanded to zero hosts (`[uint32]0xFFFFFFFF` overflows in 5.1, and the error was swallowed). `/23` → 510 hosts again; `/32` and `/31` now expand per RFC 3021, and a bad prefix warns |
+| **Docs** | README script counts corrected, and four scripts that do not exist were dropped from the list |
 
 ### v2.1.0
 | Area | Improvement |

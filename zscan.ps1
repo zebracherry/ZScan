@@ -2,12 +2,21 @@
 
 <#
 .SYNOPSIS
-    ZScan v2.1.0 - Air-gap Safe Network Scanner (PowerShell Edition)
+    ZScan v2.2.0 - Air-gap Safe Network Scanner (PowerShell Edition)
 
 .DESCRIPTION
     ZScan.ps1 - Windows network scanner with embedded NSE-equivalent scripts.
     No dependencies. No internet. No installs. Runs on any Windows 10/11/Server
     with PowerShell 5.1+ - which is every modern Windows system.
+
+    WHAT'S NEW IN v2.2:
+      Targets: -TargetFile (alias -iL) reads a target list, one per line
+      Targets: "-iL -" reads the list from stdin
+      Targets: -Target and -iL can be combined; specs are de-duplicated
+      Help:    -Help (alias -h) prints full usage; a bare run prints it too
+      Help:    Get-Help .\zscan.ps1 -Full now works (help block was unreachable)
+      Fix:     a ping sweep now records live hosts, so -Output* is not empty
+      Fix:     CSV/HTML now include a live host that has no open ports
 
     WHAT'S NEW IN v2.1:
       HTTP: OPTIONS-based method detection (PUT/DELETE/TRACE/WebDAV etc.)
@@ -90,7 +99,7 @@
     .\zscan.ps1 -h
 
 .NOTES
-    Version  : 2.1.0
+    Version  : 2.2.0
     License  : MIT
     For authorised security testing only.
     AIR-GAP SAFE: Uses only System.Net.Sockets + System.Net - built into .NET Framework
@@ -142,7 +151,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "SilentlyContinue"
 
-$VERSION = "2.1.0"
+$VERSION = "2.2.0"
 
 # -----------------------------------------------------------------------------
 # COLOUR HELPERS
