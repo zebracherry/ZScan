@@ -122,7 +122,7 @@ python3 zscan.py -h
 .\zscan.ps1 -Target 10.0.0.1 -Ports "1-1024" -ServiceDetection -OSDetect -Scripts all -OutputHTML report.html
 
 # All ports + JSON + CSV
-.\zscan.ps1 -Target 10.0.0.0/24 -T 4 -Scripts vuln -OutputJSON scan.json -OutputCSV scan.csv
+.\zscan.ps1 -Target 10.0.0.0/24 -T 4 -Scripts all -OutputJSON scan.json -OutputCSV scan.csv
 
 # Targets from a file, one per line
 .\zscan.ps1 -iL hosts.txt -Ports "22,80,443" -ServiceDetection
